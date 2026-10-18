@@ -1,0 +1,2597 @@
+<!--
+  有度积木 · 比赛训练模拟器（v2.8 / build 20261018-31，600×900 竖屏，地图已按 (x,y)→(y,x) 换方位）
+  改动人: 程序员 (Bot)   日期: 2026-10-18
+
+  当前定稿要点（历史版本说明见《训练使用说明》，deliver 只增不删）：
+   · 圈号：我方 4(337,148)、5(85,340)、6(100,120)；对岸 1(515,560)、2(500,780)、3(263,752)；
+     对位 4↔3、5↔1、6↔2（关于场地中心 (300,450) 180° 对称）。
+   · 发射判定（build-28）：车身 170×100 与圈有任何重叠就能发（不再看车心/后轮）。
+   · 车不出界（build-30，用户要求"严格整车不出界"）：车体 170×100 的四个角必须都在 [0,600]×[0,900] 内，
+     留 CAR_BOUND_MARGIN=0.5px 浮点余量；撞边停住 + 沿边滑行（不反弹）；原地转、出生/重置摆位、矩阵站位同一判据。
+   · 射程 R0（build-31：车长 190→170、后轴 -25、出生偏移 101 后重解）：标定参考位 (299.684,98.674)、车头 −115.02°；
+     **车心贴在 4 号圈外缘（61.85px，圈外 3.85px）、车身压住圈心**（obbDist=0）、整车四角在场内（最小边距 0.5px）、
+     后轮都在圈外（46.5 / 66.25px）、车尾正对 1 号圈心；球出生点 → 1 号圈心 = **R0 = computeBaseRange() = 408.101**
+     （车尾外沿量 409.101）。R0 只由 CALIB_STATION 反推。（旧"后轮压圈边"姿势在 L=170 下最多 404.48、会掉 4 对。）
+   · 指挥部（build-31）：判定半径 = 绘制半径 = 140（两边放大，画多大就判多大）。
+   · 护栏（build-31）：中线 ±71、厚 8 → 净宽 134（外表面齐桥沿）；**只报警+计数，不减速不改方向**；
+     入口用真实"车体矩形 × 挡板矩形" SAT 相交，不再外扩车体半长（刚上桥头不误报）。
+   · 弹跳（build-29）：落地后连续衰减 40→18→8.1→3.65→1.64→0.74（6 段、总约 72.123px）；
+     k=BOUNCE_DECAY=0.45（=恢复系数 e；跳距每段 ×e，不是 e²；由 40→18 反推、待实测校准）；
+     撞边框镜面反射、每段落点都判定、预判青点遇河截断并标"预估、实际落点有散布"。
+   · 球：撞场地边框镜面反弹（路径总长恒 = R0）；散布 = 整条弹道平移（28px 圆）；按住只偏圈内概率（±8.4px，无力度 UI）。
+   · 计分：对岸圈每圈 4 个目标物、命中半径 33；击倒 20 分/个（手放 10 分/个）；发射圈不计命；一发只记一次命中。
+-->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>有度积木 - 比赛训练模拟器 v2.8 · 20261018-31（竖屏）</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #1a1d23; color: #e0e0e0;
+    display: flex; overflow: hidden;
+  }
+  #arena-wrap { flex: 1; padding: 12px; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 10px; min-width: 0; }
+  canvas { background: #2a3540; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); max-width: 100%; max-height: calc(100vh - 300px); width: auto; height: auto; touch-action: none; }
+  #panel {
+    width: 330px; flex: 0 0 330px; padding: 14px; background: #232830;
+    border-left: 1px solid #3a3f48; overflow-y: auto;
+  }
+  #panel h2 { font-size: 17px; color: #4fc3f7; margin-bottom: 10px; border-bottom: 2px solid #4fc3f7; padding-bottom: 5px; }
+  #ver-tag { font-size: 11px; color: #90a4ae; font-weight: normal; letter-spacing: 0.2px; white-space: nowrap; }
+  .targets-note { font-size: 11px; color: #90a4ae; margin: 2px 0 6px; line-height: 1.5; }
+  #panel h3 { font-size: 13px; color: #90a4ae; margin: 12px 0 6px; }
+  .stat { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; font-size: 13px; }
+  .stat-val { color: #fff; font-weight: bold; font-family: 'Courier New', monospace; }
+  .stat-val.good { color: #66bb6a; } .stat-val.warn { color: #ffa726; } .stat-val.bad { color: #ef5350; }
+  .stat-val.score { color: #ffd54f; font-size: 18px; }
+  .toggle { display: flex; justify-content: space-between; align-items: center; padding: 5px 0; }
+  .toggle label { font-size: 12px; cursor: pointer; }
+  .toggle input[type=checkbox] { width: 34px; height: 19px; appearance: none; background: #555; border-radius: 10px; position: relative; cursor: pointer; transition: 0.2s; flex: 0 0 auto; }
+  .toggle input[type=checkbox]:checked { background: #4fc3f7; }
+  .toggle input[type=checkbox]::before { content: ''; position: absolute; width: 15px; height: 15px; background: #fff; border-radius: 50%; top: 2px; left: 2px; transition: 0.2s; }
+  .toggle input[type=checkbox]:checked::before { left: 17px; }
+  button {
+    width: 100%; padding: 9px; margin-top: 6px;
+    background: #37474f; color: #fff; border: 1px solid #4fc3f7;
+    border-radius: 5px; cursor: pointer; font-size: 13px; transition: 0.15s;
+  }
+  button:hover { background: #4fc3f7; color: #000; }
+  button.primary { background: #2e7d32; border-color: #66bb6a; }
+  button.primary:hover { background: #66bb6a; color: #000; }
+  button.danger { border-color: #ef5350; }
+  button.danger:hover { background: #ef5350; color: #fff; }
+  button.success { border-color: #66bb6a; }
+  button.success:hover { background: #66bb6a; color: #000; }
+  .row { display: flex; gap: 8px; }
+  .row button { margin-top: 6px; }
+  select { background: #1a1d23; color: #fff; border: 1px solid #4fc3f7; border-radius: 4px; padding: 3px 6px; font-size: 13px; }
+  .circle-list { font-size: 12px; background: #1a1d23; padding: 6px; border-radius: 4px; }
+  .circle-list div { display: flex; justify-content: space-between; padding: 2px 0; }
+  .circle-list .hit { color: #66bb6a; } .circle-list .pending { color: #78909c; }
+  .help { font-size: 11px; color: #78909c; margin-top: 4px; line-height: 1.5; }
+  .badge { display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: bold; }
+  .badge-on { background: #4fc3f7; color: #000; } .badge-off { background: #555; color: #aaa; }
+  .key { display: inline-block; padding: 1px 5px; background: #37474f; border: 1px solid #555; border-radius: 3px; font-family: monospace; font-size: 11px; }
+  #gamepad-status { font-size: 11px; padding: 4px 8px; border-radius: 3px; margin-top: 4px; }
+  .gp-connected { background: #2e7d32; color: #fff; } .gp-disconnected { background: #555; color: #aaa; }
+  .legend { display: flex; gap: 8px; flex-wrap: wrap; font-size: 11px; margin-top: 6px; }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-swatch { width: 12px; height: 12px; border-radius: 2px; }
+  .targets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; font-size: 12px; }
+  .targets label { display: flex; align-items: center; gap: 4px; background: #1a1d23; padding: 3px 5px; border-radius: 4px; cursor: pointer; }
+  .targets input { accent-color: #4fc3f7; }
+  .slider-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #90a4ae; }
+  .slider-row input[type=range] { flex: 1; accent-color: #4fc3f7; }
+  .slider-row b { color: #fff; font-family: monospace; min-width: 42px; text-align: right; }
+  /* ===== 底部控制区（build-12，按官方 APK rocker 页：左圆摇杆 / 右 A、B 圆钮 / 下方速度条）===== */
+  #deck { width: 100%; max-width: 600px; display: flex; flex-direction: column; gap: 8px; user-select: none; }
+  #deck-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  #joy { position: relative; width: 140px; height: 140px; flex: 0 0 140px; border-radius: 50%;
+         background: radial-gradient(circle at 50% 42%, #2b3742 0%, #1b222a 72%);
+         border: 2px solid #4fc3f7; box-shadow: inset 0 0 18px rgba(79,195,247,0.22), 0 2px 10px rgba(0,0,0,0.45);
+         touch-action: none; cursor: pointer; }
+  #joy::after { content: ''; position: absolute; inset: 33px; border-radius: 50%; border: 1px dashed rgba(255,255,255,0.16); pointer-events: none; }
+  #joy.active { border-color: #9be7ff; box-shadow: inset 0 0 22px rgba(79,195,247,0.35), 0 2px 12px rgba(0,0,0,0.5); }
+  #joy-knob { position: absolute; left: 50%; top: 50%; width: 56px; height: 56px; margin: -28px 0 0 -28px; border-radius: 50%;
+              background: radial-gradient(circle at 38% 32%, #b3ecff, #29b6f6 62%, #0277bd);
+              border: 2px solid #e1f5fe; box-shadow: 0 3px 10px rgba(0,0,0,0.5);
+              transition: transform 0.14s ease-out; touch-action: none; pointer-events: none; }
+  #joy.active #joy-knob { transition: none; }
+  /* 布局（用户 2026-10-18 现场确认）：左圆摇杆 / 右侧 A、B 两键水平并排 / 下方中间横拉条（尺寸沿用官方 spaceLoading 的 220/68/60rpx 比例） */
+  #deck-acts { display: flex; flex-direction: row; gap: 14px; align-items: center; }
+  #deck-acts button { width: 64px; height: 64px; border-radius: 50%; margin: 0; padding: 0; font-size: 19px; font-weight: bold;
+                      line-height: 1.05; touch-action: none; }
+  #deck-acts button small { display: block; font-size: 9px; font-weight: normal; opacity: 0.9; }
+  #btn-fire { background: #b71c1c; border-color: #ef5350; }
+  #btn-fire.active { background: #ef5350; color: #fff; }
+  #btn-collect { background: #2e7d32; border-color: #66bb6a; }
+  #btn-collect.active { background: #66bb6a; color: #000; }
+  /* 下方中间横拉条（用户原话"下面中间速度拉条"；官方无此控件，本模拟器新增） */
+  #spd { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #90a4ae; width: 100%; }
+  #spd input[type=range] { flex: 1; accent-color: #4fc3f7; height: 24px; margin: 0; }
+  #spd b { color: #fff; font-family: 'Courier New', monospace; font-size: 12px; min-width: 46px; text-align: right; }
+  #deck-note { font-size: 10px; color: #78909c; text-align: center; line-height: 1.4; }
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.72); display: flex; justify-content: center; align-items: center; z-index: 100; }
+  .overlay.hidden { display: none; }
+  .card { background: #232830; border: 1px solid #4fc3f7; border-radius: 10px; padding: 22px 26px; width: min(420px, 90vw); text-align: center; }
+  .card h2 { color: #ffd54f; margin-bottom: 12px; font-size: 22px; }
+  .card .line { display: flex; justify-content: space-between; font-size: 14px; padding: 4px 0; border-bottom: 1px dashed #3a3f48; }
+  .card .line span:last-child { color: #fff; font-weight: bold; }
+  @media (max-width: 900px), (pointer: coarse) {
+    body { flex-direction: column; overflow: auto; height: auto; min-height: 100%; }
+    #arena-wrap { padding: 6px; }
+    canvas { max-height: none; width: 100%; height: auto; }
+    #panel { width: 100%; flex: 0 0 auto; border-left: none; border-top: 1px solid #3a3f48; }
+  }
+</style>
+</head>
+<body>
+
+<div id="arena-wrap">
+  <canvas id="arena" width="600" height="900"></canvas>
+  <div id="deck">
+    <div id="deck-row">
+      <div id="joy"><div id="joy-knob"></div></div>
+      <div id="deck-acts">
+        <button id="btn-fire">A<small>发射</small></button>
+        <button id="btn-collect">B<small>收球</small></button>
+      </div>
+    </div>
+    <div id="spd">
+      <span>速度</span>
+      <input type="range" id="spd-range" min="0" max="100" step="1" value="50">
+      <b id="spd-val">50%</b>
+    </div>
+    <div id="deck-note">布局（已按用户现场确认）：左圆摇杆 / 右侧 A=发射、B=收球两键水平并排 / 底部中间横拉条调车速（官方 App 无收球键、无独立速度条，这两项是本模拟器新增）</div>
+  </div>
+</div>
+
+<div id="panel">
+  <h2>🏆 训练模拟器 <span id="ver-tag">v2.8 · 20261018-31</span></h2>
+
+  <h3>状态</h3>
+  <div class="stat"><span>得分</span><span class="stat-val score" id="score">0</span></div>
+  <div class="stat"><span>击倒目标物</span><span class="stat-val" id="targets-down">0 / 12</span></div>
+  <div class="stat"><span>剩余时间</span><span class="stat-val" id="time">4:00</span></div>
+  <div class="stat"><span>训练阶段</span><span class="stat-val" id="phase">未开始</span></div>
+  <div class="stat"><span>已发球</span><span class="stat-val" id="balls">0 / 6</span></div>
+  <div class="stat"><span>收球状态</span><span class="stat-val" id="loaded">空</span></div>
+  <div class="stat"><span>是否在圈内</span><span class="stat-val" id="in-circle">否</span></div>
+  <div class="stat"><span>合法发射位</span><span class="stat-val" id="fire-spot">—</span></div>
+  <div class="stat"><span>过河状态</span><span class="stat-val" id="crossed">未过河</span></div>
+  <div class="stat"><span>撞护栏</span><span class="stat-val" id="barrier-hits">0</span></div>
+  <div class="stat"><span>车速上限</span><span class="stat-val" id="speed-stat">45 px/s</span></div>
+
+  <h3>抽签设置（开始前设置）</h3>
+  <div class="stat"><span>己方起点圈</span>
+    <select id="sel-start"></select>
+  </div>
+  <div class="help" style="margin:2px 0 4px">只列我方（河上方）三个圈；对方指挥部固定在左下蓝半圆；6 球发完开过去即完成比赛</div>
+  <div class="targets-note" id="note-targets">目标物<b>自动判定</b>：只有<b>对岸圈</b>有目标物，每圈 4 个、共 12 个，球进圈击倒才计分（20 分/个，手放球 10 分/个）。</div>
+  <div class="targets-note">射程固定（约 408px：标定参考位是<b>车心贴在 4 号圈外缘、车身压住圈心、整车 170×100 四角都在场地内</b>（车心 299.68,98.67 / 车头 −115.02°；车 170×100 后旧"外侧后轮压圈边"姿势最多只能到 R0≈404.5，保不住 28/30）；<b>现在只要车体压到圈里就能发射</b>；车尾正对 1 号圈中心才正好命中；<b>站在 4 号圈心打会偏出 1 号圈心约 50px（还在圈内、但压不到心）</b>；球从车尾外沿出生；<b>整车（170×100 四个角）都不会出场地</b>（车头/车尾任何部分都不许越线；撞边沿边滑行、不反弹；<b>贴边发射时球出生点会夹回场内</b>（留球半径边距），预判与实际首落点一致）；<b>落地后球会连续衰减弹跳</b>（40→18→8.1→…共 6 段、总约 72px，撞边框同样镜面反弹，<b>每段落点都判定</b>，地面<b>青色小点</b>标出<b>预估</b>弹跳落点（实际落点有散布））；每发落点是地面上的一个圆（半径 28px），实际落点在圆内随机。<b>发球口在车尾</b>（黑色是车头/收球器；<b>收球只收车头收球器正前方一小段，车尾和两侧收不到，车头要对准球</b>），朝哪开就朝反方向打。<b>球撞到场地边框会反弹</b>（入射角=反射角，瞄准线会画出反弹折线）。<b>按住发射键不会改变射程/圈心</b>，只是让落点在圈内更偏远端一点点（看不出来）。<b>球落地后会连续衰减弹跳约 72px</b>（6 段：40→18→8.1→…，撞边框同样反弹），沿途经过目标圈仍可击倒。</div>
+  <button id="btn-draw">🎲 随机抽签</button>
+
+  <h3>训练控制</h3>
+  <button id="btn-toggle" class="primary">▶ 开始训练</button>
+  <div class="row">
+    <button id="btn-reset" class="danger">🔄 重置</button>
+    <button id="btn-fullscreen">⛶ 全屏</button>
+  </div>
+
+  <h3>显示开关</h3>
+  <div class="toggle"><label for="tgt-aim">瞄准线（含撞墙反弹折线）</label><input type="checkbox" id="tgt-aim" checked></div>
+  <div class="toggle"><label for="tgt-predict">落点预判圈</label><input type="checkbox" id="tgt-predict" checked></div>
+  <div class="toggle"><label for="tgt-spread">历史落点</label><input type="checkbox" id="tgt-spread" checked></div>
+  <div class="toggle"><label for="tgt-help">辅助显示（圈号/河名）</label><input type="checkbox" id="tgt-help" checked></div>
+
+  <h3>发射</h3>
+  <div class="help">射程固定（约 408px：标定参考位是<b>车心贴在 4 号圈外缘、车身压住圈心、整车 170×100 四角都在场地内</b>（车心 299.68,98.67 / 车头 −115.02°；车 170×100 后旧"外侧后轮压圈边"姿势最多只能到 R0≈404.5，保不住 28/30）；<b>现在只要车体压到圈里就能发射</b>；车尾正对 1 号圈中心才正好命中；<b>站在 4 号圈心打会偏出 1 号圈心约 50px（还在圈内、但压不到心）</b>；球从车尾外沿出生；<b>整车（170×100 四个角）都不会出场地</b>（车头/车尾任何部分都不许越线；撞边沿边滑行、不反弹；<b>贴边发射时球出生点会夹回场内</b>（留球半径边距），预判与实际首落点一致）；<b>落地后球会连续衰减弹跳</b>（40→18→8.1→…共 6 段、总约 72px，撞边框同样镜面反弹，<b>每段落点都判定</b>，地面<b>青色小点</b>标出<b>预估</b>弹跳落点（实际落点有散布））；每发落点是地面上的一个圆（半径 28px），实际落点在圆内随机。<b>发球口在车尾</b>（黑色是车头/收球器；<b>收球只收车头收球器正前方一小段，车尾和两侧收不到，车头要对准球</b>），朝哪开就朝反方向打。<b>球撞到场地边框会反弹</b>（入射角=反射角，瞄准线会画出反弹折线）。<b>按住发射键不会改变射程/圈心</b>，只是让落点在圈内更偏远端一点点（看不出来）。<b>球落地后会连续衰减弹跳约 72px</b>（6 段：40→18→8.1→…，撞边框同样反弹），沿途经过目标圈仍可击倒。</div>
+
+  <h3>圈状态（对岸圈目标物 X/4）</h3>
+  <div class="circle-list" id="circle-list"></div>
+
+  <h3>训练辅助</h3>
+  <button id="btn-addball">➕ 加一颗球（练习用）</button>
+  <button id="btn-clear-spread">🧹 清空落点</button>
+  <button id="btn-place" class="success">📍 摆球模式（手动放=10分）</button>
+
+  <h3>场地布局</h3>
+  <div class="help" style="margin:2px 0 4px">河把场地分成<b>上下两半</b>：我方=上（基地右上），对岸=下（基地左下）；车只能走中间那座斜桥过河。</div>
+  <div class="help" style="margin:2px 0 4px">射程固定约 <b>408px</b>；<b>同侧圈也能靠边框反弹打到</b>——<b>对岸 1/2/3 互打可以得分</b>，我方 4/5/6 互打无分。<b>发射判定：车身（170×100）与圈有任何重叠就能发</b>；<b>车不出界：整车 170×100 四个角都必须留在场地内</b>（不再允许车头/车尾悬空越边）；<b>我方打对岸 9 组里 8 组能压圈心</b>（4→1、4→2、4→3、5→1、5→2、5→3、6→1、6→3；无散布时 4 全倒，开散布平均击倒 2~3 个），<b>只有 6→2 是第一落点打不到</b>（差约 120px；但落地后连续弹跳能蹭进 2 号圈近侧、击倒 1 个、20 分）。<b>矩阵口径</b>：<b>压心=第一落点</b>（28 对）；<b>按"任一段弹跳落点能击倒"算</b>，<b>以对岸圈为目标的 15 对全部能击倒 ≥1 个</b>（6→2 靠弹跳击倒 1 个/20 分；2→6 几何打不到、且 6 号是我方圈无目标物、本就不计分）。<b>说明：旧口径"6→2 完全打不到"已作废——这属于修正既有口径错误</b>（线上 -28 的两跳模型实测 6→2 就已能弹跳击倒 1 个）。详细站位见《训练使用说明》。</div>
+  <div class="legend">
+    <div class="legend-item"><div class="legend-swatch" style="background:#ffd54f"></div>己方起点</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:#2c6aba"></div>指挥部基地</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:#e0d5bc;border:1px solid #b04055"></div>对岸目标圈（4 个目标物/圈）</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:#57a0e2"></div>河</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:#a98457"></div>桥+挡板</div>
+  </div>
+
+  <h3>操作</h3>
+  <div class="help">
+    <b>键盘：</b><span class="key">↑↓←→</span>/WASD 方向，
+    <span class="key">Z</span> 收球（按 2 次），<span class="key">X</span> 发射（按住只让圈内概率偏一点点），
+    <span class="key">C</span> 瞄准线，<span class="key">空格</span> 开始/暂停，<span class="key">R</span> 重置<br>
+    <b>触屏/鼠标（地图下方）：</b>左下<b>圆摇杆</b>按住拖动开车（<b>拖动幅度就是速度</b>；<b>轻扫（&lt;80ms）或位移 &lt;8px 不会动</b>；松手立即归零回中），右下 <b>A=发射</b>、<b>B=收球</b>（默认设置，待现场确认），下面中间<b>横拉条 0~100</b> 调最高车速（官方无此控件，本模拟器新增）<br>
+    <b>手柄：</b>左摇杆方向，A=收球，B/X=发射，RB=瞄准线，Start=开始/暂停<br>
+    <b>过桥：</b>桥面净宽 134px，正着开过去就行；<b>两侧挡板只有水面那一段</b>（桥两端在岸上敞开），<b>车体只要真碰到护栏就报警</b>，<b>撞护栏只报警、不减速、不挡路</b>（速度和方向完全不受影响；<b>报警 2 秒内只提示一次</b>，持续蹭每 2 秒提示一次）
+  </div>
+  <div id="gamepad-status" class="gp-disconnected">🎮 手柄未连接（键盘/触屏也能练）</div>
+</div>
+
+<div id="overlay" class="overlay hidden">
+  <div class="card">
+    <h2 id="ov-title">训练结束</h2>
+    <div id="ov-lines"></div>
+    <button id="ov-again" class="primary" style="margin-top:14px">再来一局</button>
+    <button id="ov-close" style="margin-top:6px">查看场地</button>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+// ===== 版本/构建标记（显示与追溯用）=====
+const APP_VERSION = 'v2.8';
+const APP_BUILD = '20261018-31';
+
+// v2.8 竖屏：场地按 (x,y)→(y,x) 变换（顺时针 90° + 左右镜像），宽高对调
+const ARENA_W = 600, ARENA_H = 900, TIME_LIMIT = 240, BALL_TOTAL = 6;
+const WHEELBASE = 86, BALL_R = 16;   // 轮心距 86、球 r16（直径 32）；旧 CAR_R=55 碰撞圆已随 OBB 夹取作废、删除
+// v2.3 车手感：按住才动、松手立刻停（直接速度控制，无惯性）
+const CAR_MOVE_SPEED = 70;   // px/s
+const CAR_TURN_RATE = 2.2;   // rad/s
+const FIXED_STEP = 1 / 60;   // 物理固定子步：实际物理与弹道预判共用（累积帧 dt 逐子步推进）
+
+// ===== 6 个圈（v2.8 竖屏：原 (x,y) 经 (x,y)→(y,x) 变换；印刷号按照片）=====
+// 我方（河上方）= 印刷 4、5、6；对岸（河下方）= 印刷 1、2、3
+// build-11（用户 2026-10-18 02:29 指令：先 1↔2、再 2↔3 换号，净结果如下；几何/R0/判定一行未动）：
+//   4=(337,148)、5=(85,340)、6=(100,120)（我方不变）
+//   1=(515,560)、2=(500,780)、3=(263,752)
+// 对位关系随位置重算：4↔3、5↔1、6↔2（仍关于 (300,450) 180° 对称，和 = 600/900）
+// 直打对位：4 号圈心→1 号圈心 = 448.807px；R0 缩短后必须“车心出圈、后轮压圈边、车尾正对 1 号圈”才压圈心
+const CIRCLES = [
+  { id: 1, x: 515, y: 560, r: 58 },  // 对岸（河下方）印刷 1（build-11 按用户指令重排）
+  { id: 2, x: 500, y: 780, r: 58 },  // 对岸 印刷 2（build-11）
+  { id: 3, x: 263, y: 752, r: 58 },  // 对岸 印刷 3
+  { id: 4, x: 337, y: 148, r: 58 },  // 我方 印刷 4，默认起点圈
+  { id: 5, x:  85, y: 340, r: 58 },  // 我方 印刷 5
+  { id: 6, x: 100, y: 120, r: 58 },  // 我方 印刷 6
+];
+
+// ===== 河（v2.8 竖屏：左右走向的斜带，把场地分成上/下两半）=====
+// 我方 = 河上方（基地右上），对岸 = 河下方（基地左下）
+// 两条岸线都是 y = f(x) 单值（上=我方岸、下=对岸岸）；判定：topY(x) < y < botY(x)（x=0,30,…,600 线性插值）
+const RIVER_TOP = [[0, 482], [30, 486], [60, 490], [90, 495], [120, 500], [150, 498], [180, 495],
+  [210, 488], [240, 480], [270, 462], [300, 445], [330, 420], [360, 395], [390, 365],
+  [420, 335], [450, 296], [480, 258], [510, 251], [540, 244], [570, 240], [600, 236]];
+const RIVER_BOT = [[0, 632], [30, 632], [60, 633], [90, 632], [120, 632], [150, 631], [180, 630],
+  [210, 615], [240, 600], [270, 578], [300, 555], [330, 530], [360, 505], [390, 478],
+  [420, 450], [450, 420], [480, 390], [510, 378], [540, 365], [570, 358], [600, 352]];
+
+// ===== 桥（v2.8 竖屏：原 42° 桥经 (x,y)→(y,x) 变成 48°，仍垂直于河）=====
+// 中心 (363,446.5)、长 200、宽 150、方向 dir=(0.669,0.743)（角度 48°）；长轴两端都在岸外
+const BRIDGE = {
+  cx: 363.0, cy: 446.5, len: 200, wid: 150, angleDeg: 48, dir: [0.669, 0.743],
+};
+// 桥侧挡板：沿长边内缩、厚 8、距桥中线 ±71（净通行宽 134；车宽 100 两侧各余 17），撞它只计数/报警、不判过河、不减速。
+// build-26（用户现场纠正）：挡板**只有水面上的那一段**——桥两端在岸上的部分没有挡板、也不做碰撞。
+// 沿两条挡板中线用 inRiver() 求连续水面区间（t = 沿桥长坐标，桥心为 0），数值随校准后的河岸线自动得出：
+//   s=+1 → [-47.51, +40.56]（长 88.07）；s=-1 → [-42.00, +39.44]（长 81.44）
+// 两侧略差是因为两岸线是斜的；桥长轴两端 ±100 在岸外，所以 ±47 之外就是岸上敞口。
+const BRIDGE_RAIL = { thick: 8, centerOffset: 71 };   // build-31：±65→±71，净宽 122→134（外表面齐桥沿 ±75）；旧 inset 已无引用、删除
+function bridgeRailSpan(s) {
+  const px = -BRIDGE.dir[1], py = BRIDGE.dir[0];
+  const ox = BRIDGE.cx + s * BRIDGE_RAIL.centerOffset * px;
+  const oy = BRIDGE.cy + s * BRIDGE_RAIL.centerOffset * py;
+  const step = 0.01, half = BRIDGE.len / 2;
+  let t0 = null, t1 = null;
+  for (let t = -half; t <= half + 1e-9; t += step) {
+    if (inRiver(ox + t * BRIDGE.dir[0], oy + t * BRIDGE.dir[1])) {
+      if (t0 === null) t0 = t;
+      t1 = t;
+    }
+  }
+  if (t0 === null) return [0, 0];
+  return [Math.round(t0 * 100) / 100, Math.round(t1 * 100) / 100];
+}
+const RAIL_SPAN = { 1: bridgeRailSpan(1), '-1': bridgeRailSpan(-1) };
+
+// ===== 两个指挥部基地（蓝 1/4 圆，分别在右上 / 左下角）=====
+const BASE_US = { x: 600, y: 0, r: 140 };      // 己方指挥部（右上；build-31 判定=绘制=140）
+const BASE_THEM = { x: 0, y: 900, r: 140 };    // 对方指挥部（左下，6 球发完要开到这里；判定=绘制=140）
+
+// ===== 6 个球的初始位置（都在我方=河上方草地上，避圈/避河/避桥）=====
+const BALL_INIT = [
+  { x: 300, y:  60 }, { x: 250, y: 230 }, { x: 470, y: 120 },
+  { x: 555, y: 210 }, { x: 180, y: 350 }, { x: 310, y: 270 },
+];
+
+// ===== 目标物：只有"对岸圈"（河下方的 1/3/6）有目标物，每圈 4 个、共 12 个 =====
+// 对岸圈 = 圈心在下岸线以下（见 isFarCircle → onFarSide）
+const TARGETS_PER_CIRCLE = 4;
+const TARGET_SIZE = 26;         // 目标物（灰靶架）边长 px（原 12，汇调研员实测）
+const TARGET_OFFSETS = [[-23, -23], [23, -23], [-23, 23], [23, 23]];  // 圈内 (±23, ±23) 四个点
+// 命中半径：调研员建议 27，但 (±23,±23) 到圈心 32.5px > 27 → "一发 4 全中"永远打不出来；
+// 按规则保留 4 全中，取 33（落点在圈心能同时覆盖 4 个）。评审若改 27，需把偏移改回 ±18。
+const TARGET_HIT_RADIUS = 33;
+const AIRBORNE_SPEED = 130;     // （v2.6 起保留常量，抛物线模型不再按速度判掉河）
+
+// ===== 车/球尺寸（v2.7：车只有**两个后轮**，后驱）=====
+const CAR_LEN = 170;            // 车身长 px（build-31 用户要求再缩短 190→170；调研员照片实测 183–185，170 在区间内）
+const CAR_WID = 100;            // 车身宽 px
+const WHEEL_DIA = 48;           // 轮径 px
+const WHEEL_SPAN = 86;          // 左右后轮中心距 px（后驱两个轮子）
+const CAR_HALF_DIAG = Math.hypot(CAR_LEN / 2, CAR_WID / 2);   // ≈107.4：OBB 压圈时车心可离圈心最远
+const WHEEL_AXLE_X = -25;       // 后轴在车心后 25px（build-31：车长 170 按旧比例后移；旧 -35 作废）
+                                 // 与 R0 标定同源：标定锚点外侧后轮心距 4 号圈心 58.00px（压圈边）
+const TAIL_OFFSET = CAR_LEN / 2 + BALL_R;   // 发球口（车尾外沿）到车心 = 85 + 16 = 101（build-31）
+
+// ===== 底部控制区（build-12；布局参考官方 APK pages/modules/rocker/simple/spaceLoading.vue）=====
+// 官方遥控页：左 220rpx 圆形全向摇杆（SeniorRocker）+ 中间两个圆钮（喇叭/发射）+ 右上下摇杆（电机3 速度 -100~100）。
+// 本模拟器按用户要求做成：左圆摇杆开方向、右 A/B 两圆钮（A=发射，B=收球）、下方速度条调到最高车速。
+const JOY_SIZE = 140;                 // 摇杆底座直径 px（官方 220rpx，按页面比例缩到 140）
+const JOY_KNOB = 56;                  // 摇杆头直径 px（官方 68rpx）
+const JOY_R = (JOY_SIZE - JOY_KNOB) / 2;   // 摇杆头可移动半径 = 42px
+// 轻扫过滤（批评家/调研员 2026-10-18 复核口径）：官方摇杆页没有幅值死区（<30 那个只在巡线模式 pa()），
+// 用手感过滤代替：最短按住 50~80ms（取 80）+ 最小位移 8px，二者任一不满足都不驱动电机。
+const JOY_MIN_HOLD_MS = 80;           // 最短按住 ms（官方 50ms 一帧指令周期；取 80 保证轻扫/闪一下 0 位移）
+const JOY_MIN_DISP_PX = 8;            // 摇杆头最小位移 px（过滤微抖/轻碰，不做速度幅值死区）
+const SPEED_MIN = 20;                 // 速度条 0% → 最高车速 20 px/s
+const SPEED_MAX = CAR_MOVE_SPEED;     // 速度条 100% → 70 px/s（原基础车速）
+const SPEED_KEY = 'yodo_sim_v2_speed';
+
+// ===== 收球判定（v2.8 build-10：按真车，只收车头黑色收球器正前方那一小段）=====
+// 车体坐标（车头 +x）：宽度覆盖车身 100（|ly| ≤ 50）；沿车头方向 x ∈ [95−24, 95+20]，
+// 即最远只到车头端外 20px（≈0.6 个球径，用户要求“不要太远”），车身两侧与车尾一律收不到。
+const COLLECT_FWD = 20;         // 车头端再外伸 px
+const COLLECT_BACK = 24;        // 球心可贴近车头端内侧 px（贴着收球口也能收）
+const COLLECT_HALF_W = CAR_WID / 2;   // 收球口半宽 = 50（覆盖车身宽度）
+
+// ===== 发射（v2.7）：落点 = 车尾方向 × 固定射程 R（撞边框镜面反弹）；方向只改方向、不改距离 =====
+// 射程标定（build-31：车长 190→170、后轴 -35→-25 后重新标定；Chief 定稿甲方案）
+//   O = 4 号圈心 (337,148)；P1 = 1 号圈心 (515,560)；4→1 = 448.8073px
+//   **标定参考位**：**车心贴在 4 号圈外缘、车身压住圈心**（不再要求"外侧后轮压圈边"——L=170 下做不到）：
+//         车心 (299.684, 98.674)、车头 −115.02°（车尾正对 1 号圈心）；球出生点 = 车心 + 101×发射方向
+//   该位：车心距 4 号圈心 61.85px（圈外 3.85px）、4 号圈心落在车体内（obbDist=0、车身压住圈心）、
+//         整车四角在场内（最小边距 0.500px）、两后轮都在圈外（46.50 / 66.25px）。
+//   **R0 = computeBaseRange() = 408.101**（校准值：由标定参考位反推，不是实测射程；车尾外沿量 409.101）
+//   为什么不用旧"后轮压圈边"锚点：L=170 下它最多只能给 R0≈404.48，而 30 对矩阵要 28/30 需要 R0 ≥ 407.11。
+//   一行切换：改 CALIB_STATION 即可（R0 只此一处来源）；回归断言用 ≤0.6px 容差
+const CALIB_STATION = { x: 299.684, y: 98.674, thetaDeg: -115.02, targetId: 1 };
+const HOLD_T_MAX = 2.0;         // 按住时长只偏"圈内概率"（见 HOLD_BIAS_MAX），不改射程/圆心
+const WALL_BOUNCE_MAX = 5;      // 撞场地边框最多反弹次数（防死循环）
+const BOUNCE0 = 40;             // 落地后首跳 px（水平速度基本不变、滞空时间 ∝ 竖直速度 → 每段跳距 ×e）
+const BOUNCE_DECAY = 0.45;      // 每段衰减（由现有 40→18 反推 = 0.45，待实测校准；范围约 0.35~0.55）
+const BOUNCE_MIN = 0.5;         // 单段 < 此值停跳（默认 40/18/8.1/3.65/1.64/0.74 共 6 段，总约 72.1px）
+const BOUNCE_MAX = 20;        // 弹跳段数上限（防死循环）
+// 按住时长**不移动落点圈心**，只让圈内落点概率沿发射方向偏移：
+// bias = (holdFrac-0.5) × HOLD_BIAS_MAX → 按住 0 秒 -8.4px、一半 0、按满 +8.4px（圈内、不显示 UI）
+const HOLD_BIAS_MAX = 16.8;     // = SPREAD_R(28) × 0.6
+const SPREAD_R = 28;            // 落点圆半径 px（球直径 32 的 0.875 倍；原 20 偏小）
+const FLIGHT_SPEED = 520;       // 球飞行速度 px/s（只影响观感，不影响落点）
+const PREDICT_INTERVAL_MS = 55; // 落点预判刷新间隔（≈18Hz，节流）
+let SHOT_RANGE_BASE = 0;        // R0 = 固定射程（由 computeBaseRange() 按 CALIB_STATION 站位算出，从球出生点量）
+
+const CONFIG_KEY = 'yodo_sim_v2_config';
+const BEST_KEY = 'yodo_sim_v2_best';
+
+const state = {
+  phase: 'ready',            // ready | running | paused | finished
+  score: 0,
+  timeLeft: TIME_LIMIT,
+  elapsed: 0,
+  best: 0,
+  config: { startId: 4 },
+  balls: [],
+  loadedBall: null,
+  collectingBall: null,
+  collectProgress: 0,
+  car: { x: 85, y: 85, theta: Math.PI / 4, vl: 0, vr: 0 },
+  targets: [],               // 对岸圈的目标物（v2.3）：{ id, circleId, x, y, down }
+  spreadDots: [],
+  physics: true,
+  showAim: true,
+  showPredict: true,         // 落点预判圈开关（默认开）
+  showSpread: true,          // 历史落点开关（默认开）
+  showHelp: true,
+  placeMode: false,
+  scatter: true,             // 实际落点在圆内随机（测试可关掉做确定性验证）
+  rngState: 20261017,        // 可复现随机数状态（测试可注入种子）
+  lastPredict: null,         // 最近一次预判圆心 {x,y,type}
+  predictAlpha: 0,           // 预判圈淡入淡出
+  predictAt: -1e9,           // 上次预判刷新时间（节流用）
+  predictHold: 0,            // 上次预判对应的按住时长
+  predictX: 0, predictY: 0, predictTheta: 0,   // 上次预判时的车位姿
+  firePressedPrev: false,   // 上一帧发射键状态（按下瞬间立即刷新用）
+  pressSettled: false,      // 本次按住是否已在按下帧算过（避免按住期间逐帧重算）
+  predictCalls: 0,           // 预判实际计算次数（性能复核用）
+  predictMs: 0,              // 预判单次平均耗时 ms（EMA，复核用）
+  lastShot: null,            // 最近一发实际落点 {x,y,type}
+  lastShotSpeed: 0,          // （v2.6 起废弃，保留字段）
+  lastShotRange: 0,          // 最近一发实际射程 px（复核用）
+  lastShotTheta: 0,          // 最近一发实际发射方向 rad（复核用）
+  lastShotInfo: null,        // {speed, theta, carTheta, dTheta, predicted}
+  firePressStart: 0,
+  firePressed: false,
+  // build-13 底部控制区：摇杆（ox/oy = 手指相对"按下点"的位移，按半径限幅；heldMs 累计按住时长）+ 速度条
+  joy: { down: false, ox: 0, oy: 0, heldMs: 0, pid: null, sx: 0, sy: 0 },
+  speedPct: 50,
+  keys: {},
+  gpKeys: {},
+  gamepadIdx: null,
+  gpPrevCollect: false,
+  gpPrevFire: false,
+  gpPrevAim: false,
+  gpPrevStart: false,
+  barrierHits: 0,
+  lastBarrierAt: -9999,
+
+  crossed: false,
+  beenNorth: false,
+  reachedHQ: false,
+  shotsFired: 0,
+  shotsHit: 0,
+};
+
+// ==================== 小工具 ====================
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+function circleById(id) { return CIRCLES.find(c => c.id === id) || CIRCLES[0]; }
+
+// ===== 射程标定：车停在 CALIB_STATION（4 号圈外、两个后轮压圈边），车尾正对 1 号圈心 =====
+// 返回**从球出生点**（车尾外沿再往外 BALL_R）量的固定射程 R0
+function computeBaseRange() {
+  const st = CALIB_STATION;
+  const th = st.thetaDeg * Math.PI / 180;
+  const sp = shotSpawn(th, st.x, st.y);
+  const t = circleById(st.targetId);
+  return Math.hypot(t.x - sp.x, t.y - sp.y);
+}
+// 调研员口径：从**车尾外沿发球口**量的射程（= R0 + BALL_R ≈ 166.8 ≈ 167）
+function calibRangeFromMuzzle() { return computeBaseRange() + BALL_R; }
+SHOT_RANGE_BASE = computeBaseRange();
+
+function saveConfig() {
+  try { localStorage.setItem(CONFIG_KEY, JSON.stringify(state.config)); } catch (e) {}
+}
+function loadConfig() {
+  try {
+    const raw = localStorage.getItem(CONFIG_KEY);
+    if (!raw) return;
+    const c = JSON.parse(raw);
+    if (c && c.startId >= 1 && c.startId <= 6) state.config.startId = c.startId;
+  } catch (e) {}
+}
+function loadBest() {
+  try { state.best = parseInt(localStorage.getItem(BEST_KEY) || '0', 10) || 0; } catch (e) { state.best = 0; }
+}
+
+// v2.8：起点圈只能是我方（河上方）的圈；老配置若指到对岸圈，自动纠正并提示一次
+let startCorrected = false;
+function normalizeStartCircle() {
+  const ours = ourCircleIds();
+  if (!ours.includes(state.config.startId)) {
+    state.config.startId = defaultStartId();
+    startCorrected = true;
+  }
+}
+// 起点圈下拉：只列我方三个圈的印刷号（升序）
+function fillStartOptions() {
+  const sel = document.getElementById('sel-start');
+  if (!sel) return;
+  sel.innerHTML = '';
+  for (const id of ourCircleIds()) {
+    const op = document.createElement('option');
+    op.value = String(id);
+    op.textContent = String(id);
+    sel.appendChild(op);
+  }
+  sel.value = String(state.config.startId);
+}
+// 面板上的目标物说明：号码动态读实际情况的印刷号，不写死 4/5/6
+function refreshTargetNote() {
+  const el = document.getElementById('note-targets');
+  if (!el) return;
+  el.innerHTML = '目标物<b>自动判定</b>：只有<b>对岸圈</b>（' + farCircleIds().join('、') +
+    ' 号，河下方）有目标物，每圈 4 个、共 12 个；己方（' + ourCircleIds().join('、') +
+    ' 号，河上方）是空圈。球进对岸圈击倒才计分（20 分/个，手放球 10 分/个）。';
+}
+
+// ==================== 几何（v2.8：河=上下岸线 y(x)，桥=旋转矩形 OBB）====================
+// 岸线插值：poly = [[x, y], ...]（x 递增）→ 该 x 处的岸线 y
+function xAt(poly, y) {
+  if (y <= poly[0][0]) return poly[0][1];
+  for (let i = 0; i < poly.length - 1; i++) {
+    const a = poly[i], b = poly[i + 1];
+    if (y >= a[0] && y <= b[0]) {
+      const t = (y - a[0]) / ((b[0] - a[0]) || 1);
+      return a[1] + t * (b[1] - a[1]);
+    }
+  }
+  return poly[poly.length - 1][1];
+}
+function riverTopY(x) { return xAt(RIVER_TOP, x); }
+function riverBotY(x) { return xAt(RIVER_BOT, x); }
+// 在河里 = 上下岸线之间（先判桥再判河由调用方处理）
+function inRiver(x, y) {
+  if (x < 0 || x > ARENA_W) return false;
+  return y > riverTopY(x) && y < riverBotY(x);
+}
+// 桥 OBB 局部坐标：t = 沿桥长（跨河方向 ±len/2），p = 垂直桥长（桥宽方向 ±wid/2）
+function bridgeLocal(x, y) {
+  const dx = x - BRIDGE.cx, dy = y - BRIDGE.cy;
+  return {
+    t: dx * BRIDGE.dir[0] + dy * BRIDGE.dir[1],
+    p: -dx * BRIDGE.dir[1] + dy * BRIDGE.dir[0],
+  };
+}
+function onBridge(x, y) {
+  const q = bridgeLocal(x, y);
+  return Math.abs(q.t) <= BRIDGE.len / 2 && Math.abs(q.p) <= BRIDGE.wid / 2;
+}
+function bridgeAngle() { return Math.atan2(BRIDGE.dir[1], BRIDGE.dir[0]); }
+// 凸多边形相交（2D SAT，坐标用桥局部 (t,p)）：两矩形各两条边法线共 4 轴
+function polyOverlapLocal(A, B) {
+  for (const poly of [A, B]) {
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      const nx = -(b.p - a.p), ny = b.t - a.t;              // 边的法线
+      let minA = Infinity, maxA = -Infinity, minB = Infinity, maxB = -Infinity;
+      for (const q of A) { const d = q.t * nx + q.p * ny; if (d < minA) minA = d; if (d > maxA) maxA = d; }
+      for (const q of B) { const d = q.t * nx + q.p * ny; if (d < minB) minB = d; if (d > maxB) maxB = d; }
+      if (maxA < minB - 1e-9 || maxB < minA - 1e-9) return false;
+    }
+  }
+  return true;
+}
+// 车体矩形（170×100）与桥挡板的碰撞（build-31）：**真实"车体矩形 × 挡板矩形"相交**就报
+// （用户 2026-10-18 明确：只要碰到就报警，不加"车心进水面段"限制；也不再沿桥长外扩车体半长）。
+function carRailHit(x, y, theta) {
+  const th = theta === undefined ? state.car.theta : theta;
+  const cx = x === undefined ? state.car.x : x;
+  const cy = y === undefined ? state.car.y : y;
+  const c = Math.cos(th), sn = Math.sin(th);
+  // 四角必须按周长顺序排列（SAT 要用每条边的法线；乱序会漏轴/多轴导致误判）
+  const corners = [[CAR_LEN / 2, CAR_WID / 2], [-CAR_LEN / 2, CAR_WID / 2], [-CAR_LEN / 2, -CAR_WID / 2], [CAR_LEN / 2, -CAR_WID / 2]]
+    .map(([lx, ly]) => bridgeLocal(cx + lx * c - ly * sn, cy + lx * sn + ly * c));
+  for (const s of [1, -1]) {
+    const span = RAIL_SPAN[s];                              // 挡板只在水面段两侧，岸上段没有碰撞
+    const p0 = s * BRIDGE_RAIL.centerOffset - BRIDGE_RAIL.thick / 2;
+    const p1 = s * BRIDGE_RAIL.centerOffset + BRIDGE_RAIL.thick / 2;
+    const rail = [{ t: span[0], p: p0 }, { t: span[1], p: p0 }, { t: span[1], p: p1 }, { t: span[0], p: p1 }];
+    if (polyOverlapLocal(corners, rail)) return s;
+  }
+  return 0;
+}
+function inCircle(x, y, tol) {
+  const T = tol || 0;
+  for (const c of CIRCLES) {
+    const dx = x - c.x, dy = y - c.y;
+    const rr = c.r + T;
+    if (dx * dx + dy * dy <= rr * rr) return c;
+  }
+  return null;
+}
+// 桥侧挡板：两条沿桥长方向的细条（|t| ≤ len/2，p = ±centerOffset，厚 thick），按车半径外扩
+function railLocalHit(x, y, radius) {
+  const q = bridgeLocal(x, y);
+  const lim = BRIDGE_RAIL.thick / 2 + radius;
+  const off = BRIDGE_RAIL.centerOffset;
+  for (const s of [1, -1]) {
+    const span = RAIL_SPAN[s];
+    if (q.t < span[0] - radius || q.t > span[1] + radius) continue;
+    if (Math.abs(q.p - s * off) <= lim) return s;
+  }
+  return 0;
+}
+// 点 (qx,qy) 到车体矩形（中心 px,py、车头角 theta、170×100）的最短距离；点在车体内 = 0
+function obbPointDist(px, py, theta, qx, qy) {
+  const c = Math.cos(theta), s = Math.sin(theta);
+  const dx = qx - px, dy = qy - py;
+  const u = dx * c + dy * s;             // 车头方向
+  const v = -dx * s + dy * c;            // 垂直车身方向
+  const ex = Math.max(0, Math.abs(u) - CAR_LEN / 2);
+  const ey = Math.max(0, Math.abs(v) - CAR_WID / 2);
+  return Math.hypot(ex, ey);
+}
+// 车身矩形与圈是否相交（tol 为判定余量：负值 = 要求至少重叠这么多才算法，用于站位留余量）
+function carObbOverlapsCircle(px, py, theta, circle, tol) {
+  return obbPointDist(px, py, theta, circle.x, circle.y) <= circle.r + (tol || 0);
+}
+// 车不出界（build-30，用户要求：**严格整车不出界**）：车体 170×100 的四个角必须都在场地内，
+// 车头/车尾不再允许悬空越边。位姿 = 车心 (x,y) + 车头角 theta；
+// 当前朝向下车体在 x/y 的半投影 hx/hy 给出车心允许域 [hx+m, W−hx−m] × [hy+m, H−hy−m]，
+// m = CAR_BOUND_MARGIN（0.5px 浮点安全余量，避免四角刚好贴边时被浮点误差判越界）。
+const CAR_BOUND_MARGIN = 0.5;
+const STATION_MARGIN = 2;       // 矩阵站位额外留的余量（比边界夹取更宽，孩子摆位有 2px 容错；靠面板"差 Npx"提示纠偏）
+function carHalfExtent(theta) {
+  const c = Math.abs(Math.cos(theta)), s = Math.abs(Math.sin(theta));
+  return { hx: CAR_LEN / 2 * c + CAR_WID / 2 * s, hy: CAR_LEN / 2 * s + CAR_WID / 2 * c };
+}
+// 整车（四角）是否在场内；margin = 额外要求的安全余量
+function carObbInside(x, y, theta, margin) {
+  const m = margin === undefined ? 0 : margin;
+  const h = carHalfExtent(theta);
+  return x >= h.hx + m - 1e-9 && x <= ARENA_W - h.hx - m + 1e-9 &&
+         y >= h.hy + m - 1e-9 && y <= ARENA_H - h.hy - m + 1e-9;
+}
+// 撞边停住 + 沿边滑行（车不反弹）：把车心夹回允许域（分轴夹取 ⇒ 只被挡的那一轴停住，另一轴继续走）
+function clampCarByBounds(c) {
+  const m = CAR_BOUND_MARGIN;
+  const h = carHalfExtent(c.theta);
+  c.x = clamp(c.x, h.hx + m, ARENA_W - h.hx - m);
+  c.y = clamp(c.y, h.hy + m, ARENA_H - h.hy - m);
+}
+
+// build-30：合法发射位信息（面板用）：可发 = 车体压圈 且 整车四角在场内；否则给"离最近合法位差多少 px"
+function fireSpotInfo() {
+  const c = state.car;
+  const inside = carObbInside(c.x, c.y, c.theta, CAR_BOUND_MARGIN);
+  const cc = carInAnyCircle();
+  if (cc && inside) return { ok: true, circleId: cc.id, gap: 0 };
+  let gap = Infinity;
+  for (const C of CIRCLES) {
+    const d = obbPointDist(c.x, c.y, c.theta, C.x, C.y) - C.r;   // 车体离圈边还差多少（>0 表示没压到圈）
+    if (d < gap) gap = d;
+  }
+  if (!inside) {
+    const h = carHalfExtent(c.theta);                            // 离合法中心位还差多少（分轴越界量取模长）
+    const dx = Math.max(0, h.hx + CAR_BOUND_MARGIN - c.x, c.x - (ARENA_W - h.hx - CAR_BOUND_MARGIN));
+    const dy = Math.max(0, h.hy + CAR_BOUND_MARGIN - c.y, c.y - (ARENA_H - h.hy - CAR_BOUND_MARGIN));
+    gap = Math.max(gap, Math.hypot(dx, dy));
+  }
+  return { ok: false, circleId: null, gap: Math.max(0, gap) };
+}
+
+function carInAnyCircle() {
+  const c = state.car;
+  // 发射判定（v2.9 用户改口径）：**整个车身（170×100 矩形）与圈有任何重叠就算在圈里**，不看车心/后轮。
+  // 车身只擦到圈边也能发；整车完全在圈外才不能发。
+  for (const cc of CIRCLES) {
+    if (carObbOverlapsCircle(c.x, c.y, c.theta, cc, 0)) return cc;
+  }
+  return null;
+}
+
+// ==================== 目标物（v2.2 规则） ====================
+// v2.8 河把场地分成上（我方）/下（对岸）两半；对岸 = 下岸线以下（**几何判定，不按圈号**）
+function onFarSide(x, y) { return y > riverBotY(x); }
+function isFarCircle(c) { return onFarSide(c.x, c.y); }
+function farCircleIds() { return CIRCLES.filter(isFarCircle).map(c => c.id); }
+// 我方（河上方）圈号：起点圈下拉/随机抽签只在这里面选（河过不去，现实只能从自己半场出发）
+function ourCircleIds() { return CIRCLES.filter(c => !isFarCircle(c)).map(c => c.id).sort((a, b) => a - b); }
+// 离己方基地 (0,600) 最近的我方圈（= 默认起点圈）
+function nearestOurCircle() {
+  let best = null, bd = Infinity;
+  for (const c of CIRCLES) {
+    if (isFarCircle(c)) continue;
+    const d = Math.hypot(c.x - BASE_US.x, c.y - BASE_US.y);
+    if (d < bd) { bd = d; best = c; }
+  }
+  return best;
+}
+function defaultStartId() { const c = nearestOurCircle(); return c ? c.id : CIRCLES[0].id; }
+function targetsOfCircle(id) { return state.targets.filter(t => t.circleId === id); }
+function targetsDownCount() { return state.targets.filter(t => t.down).length; }
+function totalTargets() { return farCircleIds().length * TARGETS_PER_CIRCLE; }
+
+// 每个对岸圈在圈内 (±15,±15) 摆 4 个目标物，整轮重置时全部站立
+function buildTargets() {
+  state.targets = [];
+  for (const c of CIRCLES) {
+    if (!isFarCircle(c)) continue;
+    TARGET_OFFSETS.forEach(([dx, dy], i) => {
+      state.targets.push({ id: c.id + '-' + i, circleId: c.id, x: c.x + dx, y: c.y + dy, down: false });
+    });
+  }
+}
+
+// 球进入对岸圈时调用：把 22px 内所有站立目标击倒，按 20/10 分每个计分
+function knockTargets(b, c) {
+  if (b && b.originCircleId === c.id) return 0;   // 发射圈的目标物不计命
+  let n = 0;
+  for (const t of state.targets) {
+    if (t.down || t.circleId !== c.id) continue;
+    if (Math.hypot(b.x - t.x, b.y - t.y) < TARGET_HIT_RADIUS) { t.down = true; n++; }
+  }
+  if (!n) return 0;
+  if (!b.landing) b.landing = { x: b.x, y: b.y, type: 'circle' };
+  b._knocked = true;
+  b._knockCircleId = c.id;
+  const per = (b.placedByHand || b.handPlaced) ? 10 : 20;
+  state.score += per * n;
+  if (!b._scored) { b._scored = true; state.shotsHit++; }
+  // build-29 记账统一：本发的历史散点按"最终是否击倒"回填（弹跳后才击倒也记命中）
+  if (b._dot) { b._dot.hit = true; }
+  else if (!b._hitDot) { b._hitDot = true; state.spreadDots.push({ x: b.x, y: b.y, t: performance.now(), hit: true }); }
+  flash('🎯 圈' + c.id + ' 击倒 ' + n + ' 个目标 +' + (per * n) + ' 分！');
+  return n;
+}
+
+// （v2.7：按住时长不改变射程/圈心，只让落点在 28px 圆内沿最终方向偏概率 ±8.4px，见 HOLD_BIAS_MAX）
+
+// 沿方向走 dist、撞场地边框镜面反射（build-29：弹跳段也真实反射，不再贴边夹住）
+function advanceWithWalls(x, y, dir, dist) {
+  let ux = dir.x, uy = dir.y, px = x, py = y, remain = dist, hitWall = false, guard = 0;
+  while (remain > 1e-9 && guard++ < 20) {
+    let t = remain, axis = 0;
+    if (ux > 1e-12) { const d = (ARENA_W - px) / ux; if (d < t) { t = d; axis = 1; } }
+    else if (ux < -1e-12) { const d = (0 - px) / ux; if (d < t) { t = d; axis = 1; } }
+    if (uy > 1e-12) { const d = (ARENA_H - py) / uy; if (d < t) { t = d; axis = 2; } }
+    else if (uy < -1e-12) { const d = (0 - py) / uy; if (d < t) { t = d; axis = 2; } }
+    if (axis === 0) {
+      px += ux * remain; py += uy * remain; remain = 0;
+    } else {
+      px += ux * t; py += uy * t; remain -= t;
+      if (axis === 1) ux = -ux; else uy = -uy;
+      px = clamp(px, 0, ARENA_W); py = clamp(py, 0, ARENA_H);
+      hitWall = true;
+    }
+  }
+  return { x: px, y: py, dir: { x: ux, y: uy }, hitWall: hitWall };
+}
+// 连续衰减弹跳落点：首跳 BOUNCE0，每段 ×BOUNCE_DECAY，单段 <BOUNCE_MIN 停（最多 BOUNCE_MAX 段）
+// 每段沿"当前飞行方向"前进、撞墙按镜面反射继续；返回每段落点（含每段步长）
+function bounceTrajectory(x, y, dir) {
+  const out = [];
+  let px = x, py = y, d = { x: dir.x, y: dir.y }, step = BOUNCE0, n = 0;
+  while (step >= BOUNCE_MIN && n < BOUNCE_MAX) {
+    const a = advanceWithWalls(px, py, d, step);
+    out.push({ x: a.x, y: a.y, step: step, hitWall: a.hitWall });
+    px = a.x; py = a.y; d = a.dir; step *= BOUNCE_DECAY; n++;
+  }
+  return out;
+}
+// 弹跳总前进距离（路径长度和；反射不损失距离）
+function bounceTotal() {
+  let total = 0, step = BOUNCE0, n = 0;
+  while (step >= BOUNCE_MIN && n < BOUNCE_MAX) { total += step; step *= BOUNCE_DECAY; n++; }
+  return total;
+}
+
+// ==================== 落点预判 / 实际落点随机（v2.7：弹道折线 + 镜面反弹 + 三色结局） ====================
+// 可复现随机数（xorshift32）：测试注入固定种子即可重复跑 100 发统计；生产用时间种子
+function setRandomSeed(seed) {
+  let s = (seed >>> 0) || 1;
+  state.rngState = s;
+}
+function rnd() {
+  let x = state.rngState >>> 0;
+  x ^= x << 13; x >>>= 0;
+  x ^= x >> 17;
+  x ^= x << 5; x >>>= 0;
+  state.rngState = x;
+  return x / 4294967296;
+}
+// 圆内均匀取偏移点（半径 ≤ r）
+function rndInDisk(r) {
+  const a = rnd() * Math.PI * 2;
+  const d = Math.sqrt(rnd()) * r;
+  return { x: Math.cos(a) * d, y: Math.sin(a) * d };
+}
+
+// ==================== 发射模型（v2.7：固定射程 + 撞边框镜面反弹；方向只改方向、不改距离）====================
+// 发球口在车尾：球出生点 = 车心 + (-theta) × TAIL_OFFSET（车尾外沿）
+function shotSpawn(theta, carX, carY) {
+  const th = theta === undefined ? state.car.theta : theta;
+  const cx = carX === undefined ? state.car.x : carX;
+  const cy = carY === undefined ? state.car.y : carY;
+  // 车尾外沿再往外一个球半径 = 球出生点；车贴边时可能顶出场地，夹回场内（弹道从场内起算）
+  const sx = cx - Math.cos(th) * TAIL_OFFSET;
+  const sy = cy - Math.sin(th) * TAIL_OFFSET;
+  // build-30：车贴边/车尾方向朝外时，球出生点会顶出场地 → 夹回场内（留 BALL_R 边距，球不会从边框外冒出来）；
+  // 预判（predictPoint→shotPath）与实弹（tryFire→shotPath）都走这一个函数，保证"预判=实际"。
+  const m = BALL_R;
+  return {
+    x: clamp(sx, m, ARENA_W - m), y: clamp(sy, m, ARENA_H - m), theta: th,
+    tailX: sx, tailY: sy,
+  };
+}
+// 射程（v2.7）：固定 R0，**按住时长不影响射程/落点**（参数保留只为兼容旧调用）
+function shotRange(holdSeconds) {
+  return SHOT_RANGE_BASE;
+}
+// ===== 弹道追踪（v2.7）：从出生点沿单位方向走 R，撞场地边框按镜面反射（入射角=反射角）继续 =====
+// 场地边框 = 矩形 [0,ARENA_W] × [0,ARENA_H]；路径总长恒等于 R（反弹不损失距离）；最多 WALL_BOUNCE_MAX 次
+// 返回 { points:[起点, 撞墙点…, 落点], landing, bounces, length, endDir }（endDir = 落点处运动方向）
+function traceShot(spawnX, spawnY, dirX, dirY, R) {
+  let x = clamp(spawnX, 0, ARENA_W), y = clamp(spawnY, 0, ARENA_H);
+  let ux = dirX, uy = dirY;
+  let remain = R, bounces = 0;
+  const points = [{ x: x, y: y }];
+  while (remain > 1e-9) {
+    // 到四条边框的最近正距离 t（axis：1=竖边 x=0/900，2=横边 y=0/600）
+    let t = Infinity, axis = 0;
+    if (ux > 1e-12) { const tt = (ARENA_W - x) / ux; if (tt >= 0 && tt < t) { t = tt; axis = 1; } }
+    else if (ux < -1e-12) { const tt = -x / ux; if (tt >= 0 && tt < t) { t = tt; axis = 1; } }
+    if (uy > 1e-12) { const tt = (ARENA_H - y) / uy; if (tt >= 0 && tt < t) { t = tt; axis = 2; } }
+    else if (uy < -1e-12) { const tt = -y / uy; if (tt >= 0 && tt < t) { t = tt; axis = 2; } }
+    if (!(t <= remain) || !axis) {          // 剩余路程打不到墙 → 落点在场地内
+      x += ux * remain; y += uy * remain;
+      points.push({ x: x, y: y });
+      remain = 0;
+      break;
+    }
+    x += ux * t; y += uy * t; remain -= t;
+    if (bounces >= WALL_BOUNCE_MAX) {       // 到上限：停在撞墙点（防死循环）
+      points.push({ x: x, y: y });
+      remain = 0;
+      break;
+    }
+    // 镜面反射：垂直撞墙只翻法向分量，切向分量不变（入射角 = 反射角）
+    if (axis === 1) { x = (ux > 0 ? ARENA_W : 0); ux = -ux; }
+    else { y = (uy > 0 ? ARENA_H : 0); uy = -uy; }
+    bounces++;
+    points.push({ x: x, y: y });
+  }
+  const landing = points[points.length - 1];
+  return {
+    points: points, landing: { x: landing.x, y: landing.y }, bounces: bounces,
+    length: R, endDir: { x: ux, y: uy },
+  };
+}
+// 预判弹道（解析、无散布）：出生点 = 车尾外沿，方向 = 车尾方向(-theta)，路径总长 = 固定射程 R0
+function shotPath(holdSeconds, theta, carX, carY) {
+  const sp = shotSpawn(theta, carX, carY);
+  const R = shotRange(holdSeconds);
+  const tr = traceShot(sp.x, sp.y, -Math.cos(sp.theta), -Math.sin(sp.theta), R);
+  return {
+    spawn: sp, range: R, points: tr.points, landing: tr.landing, bounces: tr.bounces,
+    endDir: tr.endDir, theta: sp.theta, clamped: false,
+  };
+}
+// 解析落点 = 弹道折线的终点（撞边框会反弹，不再"夹到边线"）
+function landingPoint(holdSeconds, theta, carX, carY) {
+  const p = shotPath(holdSeconds, theta, carX, carY);
+  return {
+    x: p.landing.x, y: p.landing.y, spawn: p.spawn, range: p.range, clamped: p.clamped,
+    theta: p.theta, points: p.points, bounces: p.bounces, endDir: p.endDir,
+  };
+}
+// 落点结局：进对岸目标圈且能击倒 ≥1 个 → circle（绿）；落河 → river（蓝）；其余 → ground（橙）
+// originCircleId = 车发射时所在圈：**站在哪个圈里打，那个圈的目标物不计命**（否则落回自己站的圈就白送分）
+function landingOutcome(x, y, originCircleId) {
+  const c = inCircle(x, y);
+  if (c && isFarCircle(c) && c.id !== originCircleId) {
+    let hits = 0;
+    for (const t of state.targets) {
+      if (t.down || t.circleId !== c.id) continue;
+      if (Math.hypot(x - t.x, y - t.y) < TARGET_HIT_RADIUS) hits++;
+    }
+    if (hits > 0) return { type: 'circle', circleId: c.id, hits: hits };
+  }
+  if (inRiver(x, y) && !onBridge(x, y)) return { type: 'river' };
+  return { type: 'ground' };
+}
+// 预计落点（解析、不含随机散布）：方向 = 车尾方向，距离 = shotRange(按住时长)
+function predictPoint(holdSeconds, theta, carX, carY) {
+  const L = landingPoint(holdSeconds, theta, carX, carY);
+  const cx = carX === undefined ? state.car.x : carX;
+  const cy = carY === undefined ? state.car.y : carY;
+  const oc = landingOutcome(L.x, L.y, (inCircle(cx, cy) || {}).id);
+  return {
+    x: L.x, y: L.y, type: oc.type, spawn: L.spawn, range: L.range,
+    clamped: L.clamped, circleId: oc.circleId, hits: oc.hits,
+    points: L.points, bounces: L.bounces, endDir: L.endDir,
+    // build-29：落地后衰减弹跳落点；第一落点落河直接丢球不弹；弹跳某段落河 → 该点及之后都不画
+    bouncePoints: (() => {
+      if (oc.type === 'river') return [];
+      const out = [];
+      for (const q of bounceTrajectory(L.x, L.y, L.endDir || { x: 0, y: 0 })) {
+        if (inRiver(q.x, q.y) && !onBridge(q.x, q.y)) break;
+        out.push(q);
+      }
+      return out;
+    })(),
+  };
+}
+
+// 颜色映射：进对岸目标圈=绿、掉河=蓝、场内停住=橙（取消灰色）
+function landingColor(type) {
+  return type === 'circle' ? 'green' : type === 'river' ? 'blue' : 'orange';
+}
+const LANDING_RGBA = {
+  green: 'rgba(76,175,80,',
+  orange: 'rgba(255,152,0,',
+  blue: 'rgba(33,150,243,',
+};
+
+// ===== 可达矩阵（v2.9）：射程固定 R0 + 发射规则（**车体矩形与圈有任何重叠即可发**）=====
+// 撞边框反弹 = 场地折叠：未折叠终点 E = 车心 + (TAIL_OFFSET + R0)·d，落点 = Fold(E)。
+// 想落到 B 心，E 必须是 B 的某个镜像副本 (2k·W ± Bx, 2k·H ± By)（k=-2..2，对应 ≤4 次反弹）。
+// 站位约束（v2.9 用户改口径）：车体 OBB(170×100) 与 A 圈相交即可。
+// build-29：矩阵"可达"仍按**第一落点**（压心定义不变）；另返回 bounce 一列：
+//   从"离 B 心最近的那个第一落点"起算连续衰减弹跳，看弹跳落点能否进 B 圈、最深多少。
+function reachInfo(A, B) {
+  const R = SHOT_RANGE_BASE + TAIL_OFFSET;              // 车心 → 未折叠落点
+  const reachR = A.r + CAR_HALF_DIAG;                   // 车心离 A 心最远（OBB 仍压圈）
+  const cands = [];
+  for (let kx = -2; kx <= 2; kx++) {
+    for (let ky = -2; ky <= 2; ky++) {
+      for (const sx of [1, -1]) {
+        for (const sy of [1, -1]) {
+          const ex = 2 * kx * ARENA_W + sx * B.x;
+          const ey = 2 * ky * ARENA_H + sy * B.y;
+          const dv = Math.hypot(ex - A.x, ey - A.y);
+          if (dv > 2500) continue;
+          cands.push({ lb: Math.max(0, Math.abs(dv - R) - reachR), ex: ex, ey: ey, kx: kx, ky: ky });
+        }
+      }
+    }
+  }
+  cands.sort((a, b) => a.lb - b.lb);
+  function evalPhi(c, phi) {
+    const dx = Math.cos(phi), dy = Math.sin(phi);
+    const px = c.ex - R * dx, py = c.ey - R * dy;
+    if (px < 1 || px > ARENA_W - 1 || py < 1 || py > ARENA_H - 1) return null;
+    const sx = px + TAIL_OFFSET * dx, sy = py + TAIL_OFFSET * dy;
+    if (sx < 1 || sx > ARENA_W - 1 || sy < 1 || sy > ARENA_H - 1) return null;
+    const theta = Math.atan2(-dy, -dx);
+    const od = obbPointDist(px, py, theta, A.x, A.y);
+    if (od > A.r - 0.5) return null;                     // build-30：要求至少 0.5px 重叠（压圈余量 0.5px）
+    if (!carObbInside(px, py, theta, STATION_MARGIN)) return null;   // build-30：整车四角必须在场内
+
+    const P = predictPoint(0, theta, px, py);
+    const miss = Math.hypot(P.x - B.x, P.y - B.y);
+    return {
+      phi: phi, px: px, py: py, theta: theta, obbDist: od, centerDist: Math.hypot(px - A.x, py - A.y),
+      miss: miss, landing: { x: P.x, y: P.y }, endDir: P.endDir, kx: c.kx, ky: c.ky,
+    };
+  }
+  let best = null, loose = null;
+  function better(r) {
+    if (!best) return true;
+    if (Math.abs(r.miss - best.miss) > 0.2) return r.miss < best.miss;
+    if (r.obbDist !== best.obbDist) return r.obbDist < best.obbDist;
+    return r.centerDist < best.centerDist;
+  }
+  for (const c of cands) {
+    if (c.lb > B.r + 60) break;
+    const N = 720;
+    for (let k = 0; k < N; k++) {
+      const r = evalPhi(c, k * Math.PI * 2 / N);
+      if (!r) continue;
+      if (r.miss <= 0.6) { if (better(r)) best = r; }
+      else if (!loose || r.miss < loose.miss) loose = r;
+    }
+    if (best) {
+      const p0 = best.phi;
+      for (let jj = -100; jj <= 100; jj++) {
+        const r = evalPhi(c, p0 + jj * Math.PI / 36000);
+        if (r && r.miss <= 0.6 && better(r)) best = r;
+      }
+    }
+  }
+  // 弹跳后可达：从第一落点最近的那个解起算（可达行用 best，不可达行用 loose 的最近落点）
+  function bounceInfoOf(ch) {
+    if (!ch || !ch.endDir) return null;
+    const lx = ch.landing.x, ly = ch.landing.y;
+    if (inRiver(lx, ly) && !onBridge(lx, ly)) {           // 第一落点落河 → 球丢，不弹
+      return { firstMiss: ch.miss, minDist: Infinity, depth: 0, inCircle: false, atStep: 0, steps: 0, total: bounceTotal(), lostInRiver: true };
+    }
+    const pts = [];
+    for (const p of bounceTrajectory(lx, ly, ch.endDir)) {
+      if (inRiver(p.x, p.y) && !onBridge(p.x, p.y)) break;   // 弹跳落河 → 球丢，后面不再算
+      pts.push(p);
+    }
+    let minDist = Infinity, bestStep = 0;
+    for (const p of pts) {
+      const dd = Math.hypot(p.x - B.x, p.y - B.y);
+      if (dd < minDist) { minDist = dd; bestStep = p.step; }
+    }
+    return {
+      firstMiss: ch.miss,
+      minDist: minDist,
+      depth: Math.max(0, B.r - minDist),          // 弹跳落点进圈最深多少 px
+      inCircle: minDist <= B.r,
+      atStep: bestStep,
+      steps: pts.length,
+      total: bounceTotal(),
+    };
+  }
+  // build-29 第二套口径：含弹跳击倒（任一段落点距目标 < TARGET_HIT_RADIUS 就算能击倒）
+  function knockInfoOf(ch) {
+    // 只有对岸圈（有目标物）才谈"击倒"；我方圈没有目标物，那一半的"击倒"没有意义
+    if (!isFarCircle(B)) return { firstLanding: 0, bounceMax: 0, any: 0, bounceKnock: false, noTargets: true };
+    const tg = TARGET_OFFSETS.map(([dx, dy]) => ({ x: B.x + dx, y: B.y + dy }));
+    if (!ch) return { firstLanding: 0, bounceMax: 0, any: 0, bounceKnock: false };
+    let first = 0;
+    for (const t of tg) if (Math.hypot(ch.landing.x - t.x, ch.landing.y - t.y) < TARGET_HIT_RADIUS) first++;
+    let bounceMax = 0;
+    const lx = ch.landing.x, ly = ch.landing.y;
+    if (!(inRiver(lx, ly) && !onBridge(lx, ly))) {
+      for (const q of bounceTrajectory(lx, ly, ch.endDir || { x: 0, y: 0 })) {
+        if (inRiver(q.x, q.y) && !onBridge(q.x, q.y)) break;   // 弹跳落河 → 球丢，后面不再算
+        let n = 0;
+        for (const t of tg) if (Math.hypot(q.x - t.x, q.y - t.y) < TARGET_HIT_RADIUS) n++;
+        if (n > bounceMax) bounceMax = n;
+      }
+    }
+    return { firstLanding: first, bounceMax: bounceMax, any: Math.max(first, bounceMax), bounceKnock: bounceMax > 0 && first === 0 };
+  }
+  if (best) {
+    return {
+      from: A.id, to: B.id,
+      dist: Math.hypot(B.x - A.x, B.y - A.y),
+      minMiss: best.miss, reach: best.miss <= B.r + 1e-9,
+      landing: best.landing,
+      station: { x: best.px, y: best.py, theta: best.theta },
+      image: { kx: best.kx, ky: best.ky, mode: 'obb' },
+      obbDist: best.obbDist,
+      bounce: bounceInfoOf(best),
+      knock: knockInfoOf(best),
+    };
+  }
+  // 没有可达站位（第一落点打不到）：直接解"最接近 B 心的、合法可发射的第一落点"——
+  // 对 B 的每个镜像副本 E、每个出球方向 d：理想站位 P0 = E − R·d；若 P0 不合法就朝 A 圈拉回到
+  // 车体刚好压 A 圈；再用 predictPoint 实算落点，取离 B 心最近的那个（build-29，供"弹跳后可达"列用）
+  function bestReachTowardB() {
+    let out = null;
+    function consider(E, phi) {
+      if (!out) { /* noop */ }
+      const d = { x: Math.cos(phi), y: Math.sin(phi) };
+      const theta = Math.atan2(-d.y, -d.x);
+      let px = E.x - R * d.x, py = E.y - R * d.y;
+      let od = obbPointDist(px, py, theta, A.x, A.y);
+      if (od > A.r) {                                   // 拉回到"车体刚好压 A 圈 0.5px"
+        const ux = A.x - px, uy = A.y - py, L = Math.hypot(ux, uy) || 1;
+        const push = od - A.r + 0.5;
+        px += ux / L * push; py += uy / L * push;
+      }
+      if (px < 1 || px > ARENA_W - 1 || py < 1 || py > ARENA_H - 1) return;
+      if (!carObbOverlapsCircle(px, py, theta, A, 0)) return;
+      if (!carObbInside(px, py, theta, STATION_MARGIN)) return;   // build-30：整车四角必须在场内
+      const P = predictPoint(0, theta, px, py);
+      const miss = Math.hypot(P.x - B.x, P.y - B.y);
+      // 目标是"弹跳进圈最深"：从该首落点起算衰减弹跳，看最近弹跳落点离 B 心多远
+      let minDist = Infinity;
+      for (const q of bounceTrajectory(P.x, P.y, P.endDir || { x: 0, y: 0 })) {
+        const dd = Math.hypot(q.x - B.x, q.y - B.y);
+        if (dd < minDist) minDist = dd;
+      }
+      const depth = Math.max(0, B.r - minDist);
+      if (!out || depth > out.depth + 1e-9 || (Math.abs(depth - out.depth) < 1e-9 && miss < out.miss)) {
+        out = {
+          miss: miss, depth: depth, minDist: minDist,
+          landing: { x: P.x, y: P.y }, endDir: P.endDir, px: px, py: py, theta: theta, phi: phi,
+        };
+      }
+    }
+    const mirrors = [];
+    for (let kx = -2; kx <= 2; kx++) for (let ky = -2; ky <= 2; ky++)
+      for (const sx of [1, -1]) for (const sy of [1, -1]) {
+        const ex = 2 * kx * ARENA_W + sx * B.x, ey = 2 * ky * ARENA_H + sy * B.y;
+        if (Math.hypot(ex - A.x, ey - A.y) <= 2500) mirrors.push({ x: ex, y: ey });
+      }
+    for (const E of mirrors) {
+      for (let k = 0; k < 720; k++) consider(E, k * Math.PI * 2 / 720);
+    }
+    if (out) {                                          // 局部精修 ±0.5°、步进 0.01°
+      const phi0 = out.phi;
+      const E = { x: out.px + R * Math.cos(phi0), y: out.py + R * Math.sin(phi0) };
+      for (let jj = -50; jj <= 50; jj++) consider(E, phi0 + jj * Math.PI / 18000);
+    }
+    return out;
+  }
+  const fallback = best ? null : bestReachTowardB();
+  const chosen = fallback || loose;
+  const analyticMin = cands.length ? Math.max(0, cands[0].lb) : 999;
+  return {
+    from: A.id, to: B.id,
+    dist: Math.hypot(B.x - A.x, B.y - A.y),
+    minMiss: analyticMin, reach: false,
+    firstMissAchievable: chosen ? chosen.miss : null,
+    station: { x: chosen ? chosen.px : A.x, y: chosen ? chosen.py : A.y, theta: chosen ? chosen.theta : 0 },
+    image: { kx: 0, ky: 0, mode: 'obb' },
+    bounce: bounceInfoOf(chosen),
+    knock: knockInfoOf(chosen),
+  };
+}
+
+function reachMatrix() {
+  const rows = [];
+  for (const A of CIRCLES) for (const B of CIRCLES) {
+    if (A.id === B.id) continue;
+    rows.push(reachInfo(A, B));
+  }
+  return rows;
+}
+
+// （v2.6 起删除 searchShot/pickScatterShot/clampDir：落点解析式计算，不再反解方向与初速）
+
+// 当前能否发射（有球 + 在圈里 + 训练中）
+function canFireNow() {
+  return state.phase === 'running' && !!state.loadedBall && !!carInAnyCircle();
+}
+function currentHoldSeconds() {
+  return state.firePressed ? Math.max(0, (performance.now() - state.firePressStart) / 1000) : 0;
+}
+// 预判（可按指定按住时长取，测试用）
+function previewShot(holdSeconds) {
+  const cc = carInAnyCircle();
+  if (!cc) return null;
+  return predictPoint(holdSeconds === undefined ? currentHoldSeconds() : holdSeconds);
+}
+
+// ==================== 回合控制 ====================
+function resetRound(silent) {
+  state.phase = 'ready';
+  state.score = 0;
+  state.timeLeft = TIME_LIMIT;
+  state.elapsed = 0;
+  state.balls = BALL_INIT.map((b, i) => ({ x: b.x, y: b.y, vx: 0, vy: 0, alive: true, flying: false, id: i, handPlaced: false, originCircleId: null }));
+  state.loadedBall = null;
+  state.collectingBall = null;
+  state.collectProgress = 0;
+  buildTargets();
+  state.spreadDots = [];
+  state.lastPredict = null;
+  state.lastShot = null;
+  state.lastShotInfo = null;
+  state.lastShotSpeed = 0;
+  state.lastShotRange = 0;
+  state.lastShotTheta = 0;
+  state.predictAlpha = 0;
+  state.predictAt = -1e9;
+  state.predictHold = 0;
+  state.predictX = 0; state.predictY = 0; state.predictTheta = 0;
+  state.firePressedPrev = false;
+  state.pressSettled = false;
+  state.predictCalls = 0;
+  state.predictMs = 0;
+  state.firePressed = false;
+  state.barrierHits = 0;
+  state.crossed = false;
+  state.reachedHQ = false;
+  state.shotsFired = 0;
+  state.shotsHit = 0;
+  simAcc = 0;
+  state.keys = {};
+  state.gpKeys = {};
+  releaseJoy();
+  const s = circleById(state.config.startId);
+  // build-29：起始位按车头朝向做 OBB 夹取，保证整车都在场内（不是按圆半径）
+  state.car = {
+    x: s.x, y: s.y,
+    theta: Math.atan2(ARENA_H / 2 - s.y, ARENA_W / 2 - s.x), vl: 0, vr: 0,
+  };
+  clampCarByBounds(state.car);
+  document.getElementById('overlay').classList.add('hidden');
+  if (!silent) flash('🔄 已重置，点「开始训练」');
+}
+function startRound() {
+  if (state.phase === 'finished') resetRound(true);
+  state.phase = 'running';
+  flash('▶ 开始！4 分钟倒计时');
+}
+function pauseRound() {
+  if (state.phase !== 'running') return;
+  state.phase = 'paused';
+  state.keys = {};
+  releaseJoy();
+  flash('⏸ 已暂停');
+}
+function toggleRound() {
+  if (state.phase === 'running') pauseRound();
+  else startRound();
+}
+function finishRound(reason) {
+  if (state.phase === 'finished') return;
+  state.phase = 'finished';
+  state.keys = {};
+  releaseJoy();
+  state.car.vl = 0; state.car.vr = 0;
+  const used = Math.min(state.shotsFired, BALL_TOTAL);
+  const acc = state.shotsFired ? Math.round(state.shotsHit / state.shotsFired * 100) : 0;
+  const isBest = state.score > state.best;
+  if (isBest) { state.best = state.score; try { localStorage.setItem(BEST_KEY, String(state.best)); } catch (e) {} }
+  const lines = [
+    ['结束原因', reason],
+    ['得分', state.score + ' 分'],
+    ['击倒目标物', targetsDownCount() + ' / ' + totalTargets()],
+    ['已发 / 命中', state.shotsFired + ' / ' + state.shotsHit],
+    ['命中率', acc + '%'],
+    ['撞护栏', state.barrierHits + ' 次'],
+    ['到达对方指挥部', state.reachedHQ ? '是' : '否'],
+    ['用时', fmtTime(state.elapsed)],
+    ['历史最佳', state.best + ' 分'],
+  ];
+  document.getElementById('ov-title').textContent = state.reachedHQ ? '🎉 完成比赛' : '⏰ ' + reason;
+  document.getElementById('ov-lines').innerHTML = lines.map(l =>
+    '<div class="line"><span>' + l[0] + '</span><span>' + l[1] + '</span></div>').join('');
+  document.getElementById('overlay').classList.remove('hidden');
+  flash('🏁 ' + reason + '，总分 ' + state.score);
+}
+function fmtTime(t) {
+  return Math.floor(t / 60) + ':' + String(Math.floor(t % 60)).padStart(2, '0');
+}
+
+// ==================== 输入 ====================
+const KEY_MAP = {
+  'ArrowUp': 'up', 'ArrowDown': 'down', 'ArrowLeft': 'left', 'ArrowRight': 'right',
+  'w': 'up', 's': 'down', 'a': 'left', 'd': 'right',
+  'W': 'up', 'S': 'down', 'A': 'left', 'D': 'right',
+  'z': 'collect', 'Z': 'collect', 'x': 'fire', 'X': 'fire', 'c': 'aim', 'C': 'aim',
+};
+window.addEventListener('keydown', e => {
+  if (e.key === ' ') { e.preventDefault(); toggleRound(); return; }
+  if (e.key === 'r' || e.key === 'R') { resetRound(); return; }
+  const k = KEY_MAP[e.key];
+  if (!k) return;
+  if (k === 'collect') { if (!e.repeat) tryCollect(); e.preventDefault(); return; }
+  if (k === 'aim') { if (!e.repeat) toggleAim(); e.preventDefault(); return; }
+  state.keys[k] = true;
+  if (k === 'fire' && !state.firePressed) {
+    state.firePressed = true;
+    state.firePressStart = performance.now();
+  }
+  e.preventDefault();
+});
+window.addEventListener('keyup', e => {
+  const k = KEY_MAP[e.key];
+  if (!k) return;
+  state.keys[k] = false;
+  if (k === 'fire' && state.firePressed) {
+    const dt = (performance.now() - state.firePressStart) / 1000;
+    state.firePressed = false;
+    tryFire(dt);
+  }
+});
+window.addEventListener('gamepadconnected', e => {
+  state.gamepadIdx = e.gamepad.index;
+  const el = document.getElementById('gamepad-status');
+  el.textContent = '🎮 ' + (e.gamepad.id || '').slice(0, 28);
+  el.className = 'gp-connected';
+});
+window.addEventListener('gamepaddisconnected', e => {
+  if (state.gamepadIdx === e.gamepad.index) {
+    state.gamepadIdx = null;
+    const el = document.getElementById('gamepad-status');
+    el.textContent = '🎮 手柄未连接（键盘/触屏也能练）';
+    el.className = 'gp-disconnected';
+  }
+});
+function toggleAim() { document.getElementById('tgt-aim').click(); }
+
+function pollGamepad() {
+  if (state.gamepadIdx === null) { state.gpKeys = {}; return; }
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  const gp = pads[state.gamepadIdx];
+  if (!gp || !gp.axes || !gp.buttons) { state.gpKeys = {}; return; }
+  const dead = 0.15;
+  const lx = gp.axes[0] || 0, ly = gp.axes[1] || 0;
+  // 每帧重建手柄方向键状态，避免松开摇杆后车一直跑
+  const g = {};
+  if (lx < -dead) g.left = true;
+  if (lx >  dead) g.right = true;
+  if (ly < -dead) g.up = true;
+  if (ly >  dead) g.down = true;
+  if (gp.buttons[14] && gp.buttons[14].pressed) g.left = true;
+  if (gp.buttons[15] && gp.buttons[15].pressed) g.right = true;
+  if (gp.buttons[12] && gp.buttons[12].pressed) g.up = true;
+  if (gp.buttons[13] && gp.buttons[13].pressed) g.down = true;
+  state.gpKeys = g;
+
+  const a = !!(gp.buttons[0] && gp.buttons[0].pressed);
+  const b = !!(gp.buttons[1] && gp.buttons[1].pressed) || !!(gp.buttons[2] && gp.buttons[2].pressed);
+  const rb = !!(gp.buttons[5] && gp.buttons[5].pressed);
+  const start = !!(gp.buttons[9] && gp.buttons[9].pressed);
+  if (a && !state.gpPrevCollect) tryCollect();
+  state.gpPrevCollect = a;
+  if (b && !state.gpPrevFire) { state.firePressed = true; state.firePressStart = performance.now(); }
+  if (!b && state.gpPrevFire && state.firePressed) {
+    const dt = (performance.now() - state.firePressStart) / 1000;
+    state.firePressed = false;
+    tryFire(dt);
+  }
+  state.gpPrevFire = b;
+  if (rb && !state.gpPrevAim) toggleAim();
+  state.gpPrevAim = rb;
+  if (start && !state.gpPrevStart) toggleRound();
+  state.gpPrevStart = start;
+}
+
+function keyDown(k) { return !!(state.keys[k] || state.gpKeys[k]); }
+
+// ==================== 速度条 / 摇杆（build-12）====================
+// 速度条 0~100 → 最高车速 20~70 px/s（键盘和摇杆都受它限制）
+function maxCarSpeed() { return SPEED_MIN + (SPEED_MAX - SPEED_MIN) * state.speedPct / 100; }
+function setSpeedPct(v, silent) {
+  state.speedPct = clamp(Math.round(Number(v)), 0, 100);   // 连续 0~100（官方 App 无此控件，本模拟器新增）
+  const r = document.getElementById('spd-range');
+  const b = document.getElementById('spd-val');
+  const st = document.getElementById('speed-stat');
+  if (r) r.value = String(state.speedPct);
+  if (b) b.textContent = state.speedPct + '%';
+  if (st) st.textContent = maxCarSpeed().toFixed(0) + ' px/s';
+  if (!silent) { try { localStorage.setItem(SPEED_KEY, String(state.speedPct)); } catch (e) {} }
+}
+// 摇杆 → 运动量。官方 SeniorRocker：按下记起点、移动时归一化、松手归零。
+// 轻扫过滤（build-17 起）：不做幅度死区（官方摇杆页 ma() 无 <30 死区），只用
+// 最短按住 JOY_MIN_HOLD_MS=80ms + 最小位移 JOY_MIN_DISP_PX=8px —— 轻扫/点一下不产生位移，松手立刻停。
+function joyMotion() {
+  const j = state.joy;
+  const fx = clamp(j.ox / JOY_R, -1, 1);
+  const fy = clamp(-j.oy / JOY_R, -1, 1);      // 往上推 fy>0（前进）
+  const mag = Math.hypot(fx, fy);
+  const dispPx = mag * JOY_R;                  // 摇杆头实际位移 px
+  const spd = Math.round(mag * 100);           // APK：摇杆拖动幅度就是速度 0~100（无幅值死区）
+  // 轻扫过滤：按住 <80ms、或位移 <8px → 视为没推（这不改变 <30 的幅值映射，只过滤点按/闪一下）
+  const engaged = !!(j.down && j.heldMs >= JOY_MIN_HOLD_MS && dispPx >= JOY_MIN_DISP_PX);
+  const throttle = engaged ? spd / 100 : 0;
+  return { fx, fy, mag, dispPx, spd, engaged, throttle, ux: mag > 1e-9 ? fx / mag : 0, uy: mag > 1e-9 ? fy / mag : 0 };
+}
+function releaseJoy() {
+  state.joy.down = false; state.joy.ox = 0; state.joy.oy = 0;
+  state.joy.heldMs = 0; state.joy.pid = null; state.joy.sx = 0; state.joy.sy = 0;
+  const el = document.getElementById('joy'), k = document.getElementById('joy-knob');
+  if (el) el.classList.remove('active');
+  if (k) k.style.transform = 'translate(0px, 0px)';
+}
+
+// ==================== 车 ====================
+function updateCar(dt) {
+  const c = state.car;
+  // v2.3：每帧直接从按键状态求速度/角速度——按下那一帧即到设定值，松开立即归零，无惯性
+  const vmax = maxCarSpeed();
+  const wmax = CAR_TURN_RATE * (vmax / CAR_MOVE_SPEED);   // 转向速度按车速等比缩放（转弯半径不变）
+  let v = 0, w = 0;
+  if (state.joy.down) state.joy.heldMs += dt * 1000;      // 摇杆按住时长（用于"轻扫不动"门限）
+  const jm = joyMotion();
+  if (jm.engaged) {
+    v = jm.uy * jm.throttle * vmax;
+    w = -jm.ux * jm.throttle * wmax;
+  } else {
+    if (keyDown('up'))    v += vmax;
+    if (keyDown('down'))  v -= vmax;
+    if (keyDown('left'))  w += wmax;
+    if (keyDown('right')) w -= wmax;
+  }
+  c.vl = v - w * WHEELBASE / 2;
+  c.vr = v + w * WHEELBASE / 2;
+
+  const dx = v * Math.cos(c.theta) * dt;
+  const dy = v * Math.sin(c.theta) * dt;
+  const px = c.x, py = c.y;
+  c.x += dx; c.y += dy;
+  c.theta += w * dt;
+
+  // 河：只能走桥，否则挡住（分轴回退）
+  const inWater = (x, y) => inRiver(x, y) && !onBridge(x, y);
+  if (inWater(c.x, c.y)) {
+    c.x = px; c.y = py;
+    if (!inWater(px + dx, py)) { c.x = px + dx; }
+    else if (!inWater(px, py + dy)) { c.y = py + dy; }
+    c.vl *= 0.4; c.vr *= 0.4;
+    flashThrottled('🌊 不能开进河里，走桥！', 1200);
+  }
+
+  // 桥侧挡板（build-31）：撞护栏**不阻挡推进、不减速**，只计数 + 报警。
+  // 旧实现"回退到上一帧位置"会把可通行窗口压到 ±10px/±2°，摇杆根本打不进桥（用户反馈上不了桥）。
+  // build-26：挡板只覆盖水面段（RAIL_SPAN），桥两端岸上敞口、无碰撞。
+  if (carRailHit(c.x, c.y, c.theta)) hitBarrier();
+
+  // 外边框（build-30：用户要求**严格整车不出界**）：车体 170×100 的四个角都必须留在场内。
+  // 顺序固定：先按当前帧的 v/w 得到新位姿（含转向）→ 再按新朝向把车心夹回允许域；
+  // 分轴夹取 = 撞边停住 + 沿边滑行（车不反弹）；夹取幂等，单帧只做一次，不会抖。
+  clampCarByBounds(c);
+
+  // 过河判定：车到河下岸（对岸半场）
+  const far = onFarSide(c.x, c.y);
+  if (far && !state.crossed) { state.crossed = true; flash('🌉 已过河！'); }
+  if (!far && state.crossed) state.crossed = false;
+  // 到达对方指挥部（左下蓝半圆）
+  if (!state.reachedHQ && Math.hypot(c.x - BASE_THEM.x, c.y - BASE_THEM.y) < BASE_THEM.r) {
+    state.reachedHQ = true;
+    finishRound('到达对方指挥部');
+  }
+}
+function hitBarrier() {
+  const now = performance.now();
+  // build-31：撞护栏**只报警、只计数，不减速、不改方向**（用户要求，别干扰操作）
+  if (now - state.lastBarrierAt < 2000) return; // build-31：报警节流 2s（Chief/批评家：2 秒内只提示一次，别一直闪）
+  state.lastBarrierAt = now;
+  state.barrierHits++;
+  flash('⚠️ 撞到护栏（只提示，不减速）');
+}
+
+// ==================== 收球 / 发射 ====================
+// 车头黑色收球器正前方区域判定（v2.8 build-10）：车体坐标下 x∈[L−24, L+20]、|y|≤50
+function inCollectZone(b) {
+  const dx = b.x - state.car.x, dy = b.y - state.car.y;
+  const ca = Math.cos(state.car.theta), sa = Math.sin(state.car.theta);
+  const lx = dx * ca + dy * sa;            // 沿车头方向分量
+  const ly = -dx * sa + dy * ca;           // 侧向分量
+  return lx >= CAR_LEN / 2 - COLLECT_BACK && lx <= CAR_LEN / 2 + COLLECT_FWD
+      && Math.abs(ly) <= COLLECT_HALF_W;
+}
+
+function tryCollect() {
+  if (state.phase !== 'running') { flashThrottled('先点「开始训练」', 1500); return; }
+  if (state.loadedBall) { flashThrottled('⚠️ 已装好球，先发射', 1200); return; }
+  if (state.collectingBall) {
+    state.loadedBall = state.collectingBall;
+    state.collectingBall = null;
+    state.collectProgress = 2;
+    flash('🟢 装好！可以发射');
+    return;
+  }
+  // 只收车头收球器前方的球；多个球时取离车心最近的那个
+  let nearest = null, minD = Infinity;
+  for (const b of state.balls) {
+    if (!b.alive) continue;
+    if (!inCollectZone(b)) continue;
+    const d = Math.hypot(b.x - state.car.x, b.y - state.car.y);
+    if (d < minD) { nearest = b; minD = d; }
+  }
+  if (nearest) {
+    state.collectingBall = nearest;
+    state.collectProgress = 1;
+    flash('🔵 卷入中…再按一次收球');
+  } else {
+    flashThrottled('⚠️ 车头收球器旁边没有球（车要对准球）', 1400);
+  }
+}
+
+function tryFire(pressDuration) {
+  if (state.phase !== 'running') { flashThrottled('先点「开始训练」', 1500); return; }
+  if (!state.loadedBall) { flashThrottled('⚠️ 没装球', 1200); return; }
+  const carCircle = carInAnyCircle();
+  if (!carCircle) { flashThrottled('⚠️ 车身要压到圈里（车身与圈有任何重叠）才能发射', 1500); return; }
+
+  // v2.7：发射方向 = 车尾方向（-theta）；射程 = 固定 R0；撞边框镜面反弹，弹道总长恒 = R0
+  const theta = state.car.theta;
+  const P = predictPoint(pressDuration, theta);
+  state.lastPredict = P;
+
+  // 实际弹道：散布 = **整条弹道平行平移**（起点在发球口 28px 圆内取样）
+  // → 弹道总长仍严格 = R0；实际落点距预判圆心 ≤ SPREAD_R（撞墙时位移按反射折叠，模长不变）
+  let actual = {
+    spawn: P.spawn, range: P.range, points: P.points, bounces: P.bounces, endDir: P.endDir,
+    landing: { x: P.x, y: P.y },
+  };
+  if (state.scatter) {
+    const ux = -Math.cos(theta), uy = -Math.sin(theta);        // 出膛方向
+    const holdFrac = Math.min(1, Math.max(0, (pressDuration || 0) / HOLD_T_MAX));
+    const bias = (holdFrac - 0.5) * HOLD_BIAS_MAX;             // 按住越久越偏远端（均值 ±8.4px）
+    // 圈内取点：先按 |bias| 收缩采样半径，再整体沿出膛方向平移 bias
+    // → 均值精确等于 bias；反射把出膛方向原样带到落点处，均值就落在"沿最终方向 bias"上
+    const Rlim = SPREAD_R - 0.5;
+    const Reff = Math.max(1, Rlim - Math.abs(bias));
+    const o = rndInDisk(Reff);
+    actual = shotPath(0, theta, state.car.x + o.x + ux * bias, state.car.y + o.y + uy * bias);
+  }
+  const lx = actual.landing.x, ly = actual.landing.y;
+
+  const b = state.loadedBall;
+  state.loadedBall = null;
+  state.collectProgress = 0;
+  b.alive = true;
+  b.flying = true;
+  b.x = actual.spawn.x;
+  b.y = actual.spawn.y;
+  b.landing = null;
+  // 抛物线飞行：沿弹道折线（含反弹段）匀速飞完全程，到终点即停（不滚、不再二次反射）
+  const total = Math.max(1e-6, actual.range);
+  b.flight = {
+    points: actual.points.map(p => ({ x: p.x, y: p.y })),
+    total: total, t: 0, dur: Math.max(0.12, total / FLIGHT_SPEED), toX: lx, toY: ly,
+  };
+  b.vx = (lx - actual.spawn.x) / b.flight.dur;
+  b.vy = (ly - actual.spawn.y) / b.flight.dur;
+  // 从哪个圈发射，这个圈的目标物就不算命中（否则球一出生就在圈里白送分）
+  b.originCircleId = carCircle.id;
+  b.placedByHand = b.handPlaced || false;
+  b._scored = false;
+  b._hitDot = false;
+  const ed = actual.endDir || { x: 0, y: 0 };
+  b.launchTheta = Math.atan2(ed.y, ed.x);
+  b.unit = { x: ed.x, y: ed.y };            // 落点处运动方向：落地后前弹用
+  b.flightEndDir = { x: ed.x, y: ed.y };
+  b.flightPoints = b.flight.points;
+  b.bounces = actual.bounces;
+  b.launchRange = P.range;
+  state.lastShotSpeed = 0;
+  state.lastShotTheta = b.launchTheta;
+  state.lastShotRange = P.range;
+  state.lastShotInfo = {
+    range: P.range, theta: b.launchTheta, carTheta: theta, predicted: P,
+    aim: { x: lx, y: ly }, points: b.flight.points, bounces: actual.bounces,
+    endDir: { x: ed.x, y: ed.y },
+  };
+  state.shotsFired++;
+  flash('💨 发射！');
+  return state.lastShotInfo;
+}
+
+// 落地判定（v2.7）：第一落点判定 → 沿发射方向**向前弹两次**（BOUNCE0=40、BOUNCE2=18，每段落点都判定）
+// 预判圈显示的是**第一落点**；历史落点也记第一落点（与预判一致），球最终停在弹完的位置
+function landBall(b, oc) {
+  b.flying = false;
+  if (b.flight) { b.x = b.flight.toX; b.y = b.flight.toY; }
+  b.vx = 0; b.vy = 0; b.flight = null;
+  const firstX = b.x, firstY = b.y;
+  b.landing = { x: firstX, y: firstY, type: oc.type };
+  state.lastShot = b.landing;
+  // 一发球只记一个历史落点（坐标=第一落点，和预判圈对得上）；命中与否最后按"本发是否击倒"统一回填
+  if (!b._hitDot) {
+    b._hitDot = true;
+    b._dot = { x: firstX, y: firstY, t: performance.now(), hit: false, river: oc.type === 'river' };
+    state.spreadDots.push(b._dot);
+  }
+  if (oc.type === 'circle') knockTargets(b, circleById(oc.circleId));
+  if (oc.type === 'river') { flash('💧 球掉河里了！'); b.alive = false; return; }
+
+  // build-29：连续衰减弹跳（首跳 40、每段×0.45、<0.5 停），撞场地边框镜面反射，**每段落点都判定**
+  const u = b.unit || { x: -Math.cos(b.launchTheta || 0), y: -Math.sin(b.launchTheta || 0) };
+  const track = bounceTrajectory(firstX, firstY, u);
+  b.bounceLandings = track;
+  for (const p of track) {
+    const oc2 = landingOutcome(p.x, p.y, b.originCircleId);
+    if (oc2.type === 'circle') knockTargets(b, circleById(oc2.circleId));
+    if (oc2.type === 'river') {
+      b.x = p.x; b.y = p.y;
+      flash('💧 球弹进河里了！');
+      b.alive = false;
+      break;
+    }
+    b.x = p.x; b.y = p.y;
+  }
+  // build-29 记账统一：只要本发有任何一段击倒目标，landing.type 记 circle（坐标仍保留第一落点）
+  if (b._knocked) {
+    b.landing.type = 'circle';
+    b.landing.circleId = b._knockCircleId;
+  }
+}
+
+function stopBall(b, kind) { // kind: 'miss' | 'river'（兼容旧调用）
+  b.alive = false; b.flying = false;
+  if (!b.landing) b.landing = { x: b.x, y: b.y, type: kind === 'river' ? 'river' : 'ground' };
+  state.lastShot = b.landing;
+  if (!b._hitDot) state.spreadDots.push({ x: b.x, y: b.y, t: performance.now(), hit: false, river: kind === 'river' });
+}
+
+// ==================== 球飞行（v2.7：沿弹道折线匀速飞，含反弹段；到终点判结局） ====================
+function updateBalls(dt) {
+  for (const b of state.balls) {
+    if (!b.alive || !b.flying) continue;
+    if (!b.flight) {
+      // 兜底：没有飞行轨迹的球（测试直接放的球、摆球/加球）→ 当前位置直接判落点
+      landBall(b, landingOutcome(b.x, b.y, b.originCircleId));
+      continue;
+    }
+    b.flight.t += dt;
+    const k = Math.min(1, b.flight.t / b.flight.dur);
+    const s = k * b.flight.total;
+    const pts = b.flight.points;
+    // 沿弹道折线按弧长取当前点（反弹段也真的走，不再"斜线直连"）
+    let acc = 0, px = pts[0].x, py = pts[0].y;
+    for (let i = 1; i < pts.length; i++) {
+      const seg = Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+      if (acc + seg >= s || i === pts.length - 1) {
+        const f = seg > 1e-9 ? Math.min(1, (s - acc) / seg) : 1;
+        px = pts[i - 1].x + (pts[i].x - pts[i - 1].x) * f;
+        py = pts[i - 1].y + (pts[i].y - pts[i - 1].y) * f;
+        break;
+      }
+      acc += seg;
+    }
+    b.x = px; b.y = py;
+    if (k >= 1) {
+      const last = pts[pts.length - 1];
+      landBall(b, landingOutcome(last.x, last.y, b.originCircleId));
+    }
+  }
+}
+
+function syncCollectingBall() {
+  const b = state.collectingBall;
+  if (!b) return;
+  b.x = state.car.x + Math.cos(state.car.theta) * (CAR_LEN / 2);
+  b.y = state.car.y + Math.sin(state.car.theta) * (CAR_LEN / 2);
+  b.vx = 0; b.vy = 0; b.flying = false;
+}
+
+// ==================== 提示 ====================
+let lastFlashAt = {};
+function flash(msg) {
+  const el = document.createElement('div');
+  el.textContent = msg;
+  el.style.cssText = 'position:fixed; top:16px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.88); color:#ffd54f; padding:9px 18px; border-radius:6px; font-size:17px; z-index:9999; pointer-events:none; font-weight:bold;';
+  document.body.appendChild(el);
+  setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 1500);
+}
+function flashThrottled(msg, ms) {
+  const now = performance.now();
+  if (now - (lastFlashAt[msg] || -99999) < ms) return;
+  lastFlashAt[msg] = now;
+  flash(msg);
+}
+
+// ==================== 渲染 ====================
+const canvas = document.getElementById('arena');
+const ctx = canvas.getContext('2d');
+
+// ==================== 视觉：配色与画法（v2.5 按照片重画，配色按《场地建模说明》第七节）====================
+const TAU = Math.PI * 2;
+const PAL = {
+  grass: '#93c489', patchA: '#b9d9b1', patchB: '#b2d2a4', grassDark: '#7fb375',
+  water: '#57a0e2', waterHi: '#79c2ef', bank: '#dfe8a8',
+  plank: '#a98457', plankLine: '#654e35',
+  white: '#e9eef1', whiteLine: '#aebbc2',
+  disc: '#e0d5bc', discLine: '#c3b195', discOuter: '#563c34',
+  redArc: '#b04055', numBlue: '#3f8fd0', postWhite: '#f2eddf', postLine: '#84755e',
+  hqBlue: '#2c6aba', flagRed: '#b84254',
+  frameOuter: '#4a7440', frameInner: '#e9efe6',
+  busBody: '#a3b2b6', busWin: '#3c4b56', cloud: '#eef4f2',
+  jack: '#8a9597', tractor: '#b89b80', tractor2: '#ab937b',
+  plane: '#eaf1f6', planeWing: '#b3d0e4', cockpit: '#2c4766',
+  tire: '#373e45', spoke: '#e2e9ee', carBody: '#84a0d3',
+  fish: '#e8825f', fishFin: '#d96f4d', target: '#8e9299',
+};
+
+// 圆角矩形（不用 roundRect，老环境/测试环境更稳）
+function rrect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y); ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r); ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h); ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r); ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+// ---- 草地：迷彩式大色块（替换旧的 40×40 棋盘格）----
+const GRASS_BLOBS = [
+  { x: 150, y: 110, rx:  70, ry: 120, rot: -0.14, c: 0 },
+  { x:  60, y: 330, rx:  55, ry: 110, rot:  0.10, c: 1 },
+  { x: 120, y: 620, rx:  62, ry: 140, rot: -0.06, c: 0 },
+  { x: 380, y: 810, rx:  66, ry: 120, rot:  0.16, c: 1 },
+  { x: 560, y: 640, rx:  62, ry: 150, rot: -0.10, c: 0 },
+  { x: 330, y: 300, rx:  70, ry: 120, rot: -0.20, c: 1 },
+  { x: 470, y:  90, rx:  60, ry: 110, rot:  0.08, c: 0 },
+  { x: 430, y: 500, rx:  58, ry: 130, rot: -0.12, c: 1 },
+  { x: 200, y: 760, rx:  52, ry: 100, rot: -0.05, c: 0 },
+  { x: 570, y: 200, rx:  50, ry: 130, rot:  0.05, c: 1 },
+  { x: 250, y: 420, rx:  60, ry: 110, rot: -0.18, c: 0 },
+  { x: 460, y: 690, rx:  55, ry: 120, rot:  0.12, c: 1 },
+];
+function drawGrass() {
+  ctx.fillStyle = PAL.grass;
+  ctx.fillRect(0, 0, ARENA_W, ARENA_H);
+  for (const b of GRASS_BLOBS) {
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.rotate(b.rot);
+    ctx.fillStyle = b.c ? PAL.patchA : PAL.patchB;
+    ctx.beginPath(); ctx.ellipse(0, 0, b.rx, b.ry, 0, 0, TAU); ctx.fill();
+    ctx.restore();
+  }
+  // 边缘草色过渡
+  ctx.strokeStyle = PAL.grassDark;
+  ctx.lineWidth = 14;
+  ctx.strokeRect(4, 4, ARENA_W - 8, ARENA_H - 8);
+}
+
+// ---- 垫子外框：深绿 8px（与球撞边框位置一致）+ 内侧白线 2px ----
+function drawFrame() {
+  ctx.fillStyle = PAL.frameOuter;
+  ctx.fillRect(0, 0, ARENA_W, 8);
+  ctx.fillRect(0, ARENA_H - 8, ARENA_W, 8);
+  ctx.fillRect(0, 0, 8, ARENA_H);
+  ctx.fillRect(ARENA_W - 8, 0, 8, ARENA_H);
+  ctx.strokeStyle = PAL.frameInner;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(9, 9, ARENA_W - 18, ARENA_H - 18);
+}
+
+// ---- 红旗：旗杆 6×72 + 三角旗 48×32，旗尖朝场内（dirX=+1 向右 / -1 向左）----
+function drawFlag(x, y, dirX) {
+  ctx.save();
+  ctx.fillStyle = PAL.white;
+  ctx.fillRect(x - 3, y - 72, 6, 72);
+  ctx.fillStyle = PAL.flagRed;
+  ctx.beginPath();
+  ctx.moveTo(x + 3 * dirX, y - 66);
+  ctx.lineTo(x + 51 * dirX, y - 50);
+  ctx.lineTo(x + 3 * dirX, y - 34);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+// ---- 指挥部：蓝 1/4 圆盘（绘制 r=140，判定仍 95）+ 白圆环 + 4 短杠 + "指挥部"白字 + 红旗 ----
+// v2.8 竖屏：己方在右上角 (600,0)，对方在左下角 (0,900)
+function drawHQ(base, corner) {   // corner: 'tr' 右上 / 'bl' 左下
+  const sgn = corner === 'tr' ? -1 : 1;    // 场内方向
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(base.x, base.y);
+  // build-31：绘制半径 = 判定半径（base.r），不再有第二个来源
+  if (corner === 'tr') ctx.arc(base.x, base.y, base.r, Math.PI / 2, Math.PI);
+  else ctx.arc(base.x, base.y, base.r, -Math.PI / 2, 0);
+  ctx.closePath();
+  ctx.fillStyle = PAL.hqBlue;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  // 白圆环图标（重心处 距角约 (50,50)）
+  const rx = base.x + sgn * 50, ry = base.y - sgn * 50;
+  ctx.beginPath(); ctx.arc(rx, ry, 22.5, 0, TAU);
+  ctx.lineWidth = 11; ctx.strokeStyle = PAL.white; ctx.stroke();
+  // 环旁 4 根短杠
+  ctx.lineWidth = 2; ctx.strokeStyle = PAL.white;
+  for (const deg of [45, 135, 225, 315]) {
+    ctx.save();
+    ctx.translate(rx, ry);
+    ctx.rotate(deg * Math.PI / 180);
+    ctx.beginPath(); ctx.rect(29, -4, 30, 8); ctx.stroke();
+    ctx.restore();
+  }
+  // "指挥部" 白字（沿 45° 方向朝场内）
+  ctx.save();
+  ctx.translate(base.x + sgn * 74, base.y - sgn * 74);
+  ctx.rotate(sgn * Math.PI / 4);
+  ctx.fillStyle = PAL.white;
+  ctx.font = 'bold 22px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('指挥部', 0, 0);
+  ctx.restore();
+  ctx.restore();
+  // 红旗（1/4 圆外缘 45° 方向）
+  drawFlag(base.x + sgn * 100, base.y - sgn * 100, sgn);
+}
+
+// ---- 装饰：照片里的卡通元素（统一细描边、低饱和、不透明）----
+function drawCloud(x, y, s) {
+  ctx.save();
+  ctx.fillStyle = PAL.cloud;
+  ctx.beginPath(); ctx.ellipse(x, y, 26 * s, 15 * s, 0, 0, TAU); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x - 18 * s, y + 5 * s, 17 * s, 11 * s, 0, 0, TAU); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x + 18 * s, y + 4 * s, 19 * s, 12 * s, 0, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+// 1 灰色巴士（客车）
+function drawBus() {
+  const x = 30, y = 192, w = 130, h = 46;
+  ctx.save();
+  ctx.beginPath(); rrect(x, y, w, h, 10);
+  ctx.fillStyle = PAL.busBody; ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(72,86,92,0.9)'; ctx.stroke();
+  ctx.fillStyle = PAL.busWin;
+  ctx.fillRect(x + 8, y + 10, w - 16, 11);
+  ctx.fillStyle = '#cfdde4';
+  ctx.fillRect(x + 12, y + 25, 18, 11);
+  ctx.fillRect(x + 36, y + 25, 18, 11);
+  ctx.fillStyle = PAL.tire;
+  ctx.beginPath(); ctx.arc(x + 24, y + h, 8, 0, TAU); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + w - 24, y + h, 8, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+// 2 油井 / 磕头机
+function drawPumpJack() {
+  ctx.save();
+  ctx.strokeStyle = PAL.jack;
+  ctx.lineWidth = 2.5;
+  ctx.lineJoin = 'round';
+  const x0 = 340, y0 = 228, x1 = 400, y1 = 166, x2 = 460, y2 = 228;
+  ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x0 + 20, y0 - 18); ctx.lineTo(x2 - 20, y0 - 18); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x0 + 10, y0 - 9); ctx.lineTo(x2 - 10, y0 - 9); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x1 - 28, y1 + 6); ctx.lineTo(x1 + 28, y1 + 6); ctx.stroke();
+  ctx.fillStyle = '#3f8fd0';
+  ctx.beginPath(); ctx.arc(x1, y1 - 7, 7, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+// 3 拖拉机（俯视简笔）
+function drawTractor() {
+  ctx.save();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = 'rgba(116,92,64,0.85)';
+  ctx.fillStyle = PAL.tractor;
+  ctx.fillRect(250, 240, 42, 52); ctx.strokeRect(250, 240, 42, 52);
+  ctx.fillStyle = PAL.tractor2;
+  ctx.fillRect(296, 256, 40, 36); ctx.strokeRect(296, 256, 40, 36);
+  ctx.fillStyle = PAL.tractor;
+  ctx.fillRect(266, 256, 22, 20); ctx.strokeRect(266, 256, 22, 20);
+  ctx.fillStyle = '#4a4038';
+  for (const [wx, wy] of [[258, 286], [316, 286], [258, 250], [316, 250]]) {
+    ctx.beginPath(); ctx.arc(wx, wy, 6, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+}
+// 5 战斗机（朝左上）
+function drawPlane() {
+  ctx.save();
+  ctx.translate(617, 367);
+  ctx.rotate(-0.42);
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(122,152,172,0.9)';
+  ctx.fillStyle = PAL.plane;
+  ctx.beginPath(); ctx.moveTo(-46, 0); ctx.lineTo(34, -13); ctx.lineTo(34, 13); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = PAL.planeWing;
+  ctx.beginPath(); ctx.moveTo(6, -4); ctx.lineTo(-22, -32); ctx.lineTo(-2, -6); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(6, 4); ctx.lineTo(-22, 32); ctx.lineTo(-2, 6); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(26, 0); ctx.lineTo(38, -16); ctx.lineTo(38, 16); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = PAL.cockpit;
+  ctx.beginPath(); ctx.ellipse(-20, 0, 12, 6, 0, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+// 6 蓝色汽车 + 黑色轮胎（右下角，部分出画）
+function drawBlueCar() {
+  ctx.save();
+  ctx.fillStyle = PAL.carBody;
+  ctx.beginPath(); rrect(858, 540, 60, 50, 10); ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(72,98,142,0.9)'; ctx.stroke();
+  ctx.fillStyle = '#cfe0ef';
+  ctx.fillRect(866, 550, 34, 16);
+  ctx.fillStyle = PAL.tire;
+  ctx.beginPath(); ctx.arc(866, 576, 26, 0, TAU); ctx.fill();
+  ctx.strokeStyle = PAL.spoke; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(866, 576, 15, 0, TAU); ctx.stroke();
+  ctx.fillStyle = PAL.spoke;
+  ctx.beginPath(); ctx.arc(866, 576, 5, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+function drawDecorations() {
+  // v2.8 竖屏：装饰美术仍用 900×600 设计稿坐标，这里用转置矩阵 (x,y)→(y,x) 映射到 600×900
+  ctx.save();
+  ctx.transform(0, 1, 1, 0, 0, 0);
+  drawBus();
+  drawPumpJack();
+  drawTractor();
+  drawPlane();
+  drawBlueCar();
+  drawCloud(122, 186, 1.1);   // 巴士旁白云
+  drawCloud(878, 348, 0.9);   // 白云
+  ctx.restore();
+}
+
+// ---- 河（v2.8 竖屏：左右走向的斜带，由上下岸线 y(x) 围成）----
+function drawRiver() {
+  ctx.save();
+  // 水体
+  ctx.beginPath();
+  ctx.moveTo(0, riverTopY(0));
+  for (let x = 4; x <= ARENA_W; x += 4) ctx.lineTo(x, riverTopY(x));
+  for (let x = ARENA_W; x >= 0; x -= 4) ctx.lineTo(x, riverBotY(x));
+  ctx.closePath();
+  ctx.fillStyle = PAL.water;
+  ctx.fill();
+  // 岸线淡黄绿边
+  ctx.strokeStyle = PAL.bank;
+  ctx.lineWidth = 7;
+  for (const bank of [riverTopY, riverBotY]) {
+    ctx.beginPath();
+    for (let x = 0; x <= ARENA_W; x += 4) {
+      if (x === 0) ctx.moveTo(x, bank(x)); else ctx.lineTo(x, bank(x));
+    }
+    ctx.stroke();
+  }
+  // 水面亮带（河心）
+  ctx.strokeStyle = PAL.waterHi;
+  ctx.lineWidth = 16;
+  ctx.globalAlpha = 0.40;
+  ctx.beginPath();
+  for (let x = 0; x <= ARENA_W; x += 6) {
+    const y = (riverTopY(x) + riverBotY(x)) / 2;
+    if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+  // 白色波浪纹
+  ctx.strokeStyle = 'rgba(255,255,255,0.70)';
+  ctx.lineWidth = 2;
+  for (let x = 44; x < ARENA_W - 20; x += 64) {
+    const cy = (riverTopY(x) + riverBotY(x)) / 2;
+    ctx.beginPath();
+    ctx.moveTo(x, cy - 18);
+    ctx.bezierCurveTo(x - 6, cy - 6, x + 6, cy + 6, x, cy + 18);
+    ctx.stroke();
+  }
+  // 卡通鱼（河心 x=300）
+  const fx = 300, fy = (riverTopY(fx) + riverBotY(fx)) / 2;
+  ctx.save();
+  ctx.translate(fx, fy);
+  ctx.rotate(Math.PI / 2);
+  ctx.fillStyle = PAL.fish;
+  ctx.beginPath(); ctx.ellipse(0, 0, 26, 13, -0.2, 0, TAU); ctx.fill();
+  ctx.fillStyle = PAL.fishFin;
+  ctx.beginPath(); ctx.moveTo(-24, -3); ctx.lineTo(-40, -14); ctx.lineTo(-38, 11); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(-3, -11); ctx.lineTo(5, -22); ctx.lineTo(12, -9); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(14, -3, 4.5, 0, TAU); ctx.fill();
+  ctx.fillStyle = '#2c3e50';
+  ctx.beginPath(); ctx.arc(15, -3, 2.2, 0, TAU); ctx.fill();
+  ctx.restore();
+  ctx.restore();
+}
+
+// ---- 桥（v2.8 竖屏：48° 横跨河；木板条垂直于长轴排列 + 两端白色桥头块 + 两侧白色挡板）----
+function drawBridge() {
+  const ang = Math.atan2(BRIDGE.dir[1], BRIDGE.dir[0]);
+  const L = BRIDGE.len / 2, W = BRIDGE.wid / 2;
+  const planks = 6, gap = 5;
+  const pw = (BRIDGE.len - gap * (planks - 1)) / planks;   // 每条木板沿桥长的宽度
+  ctx.save();
+  ctx.translate(BRIDGE.cx, BRIDGE.cy);
+  ctx.rotate(ang);
+  // 木板条**垂直于长轴**排（沿桥宽方向铺满，板缝露下方水色）
+  for (let i = 0; i < planks; i++) {
+    const x0 = -L + i * (pw + gap);
+    ctx.fillStyle = PAL.plank;
+    ctx.fillRect(x0, -W, pw, BRIDGE.wid);
+    ctx.strokeStyle = PAL.plankLine;
+    ctx.lineWidth = 1.2;
+    ctx.strokeRect(x0, -W, pw, BRIDGE.wid);
+    ctx.strokeStyle = 'rgba(101,78,53,0.45)';
+    ctx.beginPath();
+    ctx.moveTo(x0 + pw * 0.35, -W + 10);
+    ctx.lineTo(x0 + pw * 0.35, W - 10);
+    ctx.stroke();
+  }
+  // 两端白色桥头块（白色塑料桥头件；角度变了以后仍放在长轴两端）
+  ctx.fillStyle = PAL.white;
+  ctx.strokeStyle = PAL.whiteLine;
+  ctx.lineWidth = 2;
+  for (const bx of [-L, L - 18]) {
+    ctx.fillRect(bx, -W, 18, BRIDGE.wid);
+    ctx.strokeRect(bx, -W, 18, BRIDGE.wid);
+  }
+  // 桥头块上的小方孔
+  ctx.fillStyle = 'rgba(150,168,178,0.5)';
+  for (const bx of [-L + 4, L - 14]) {
+    for (const by of [-W + 14, W - 28]) ctx.fillRect(bx, by, 10, 14);
+  }
+  // 两侧挡板：白色塑料挡块（只挡不许撞倒）
+  ctx.fillStyle = PAL.white;
+  ctx.strokeStyle = PAL.whiteLine;
+  ctx.lineWidth = 1.5;
+  const rh = BRIDGE_RAIL.thick;
+  for (const s of [-1, 1]) {
+    const yc = s * BRIDGE_RAIL.centerOffset;
+    const sp = RAIL_SPAN[s];                    // 只画水面段，岸上敞开
+    ctx.fillRect(sp[0], yc - rh / 2, sp[1] - sp[0], rh);
+    ctx.strokeRect(sp[0], yc - rh / 2, sp[1] - sp[0], rh);
+  }
+  // 桥外轮廓
+  ctx.strokeStyle = PAL.plankLine;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(-L, -W, BRIDGE.len, BRIDGE.wid);
+  ctx.restore();
+}
+
+function drawArena() {
+  drawGrass();
+  drawDecorations();
+
+  drawRiver();
+  drawBridge();
+
+  drawHQ(BASE_US, 'tr');
+  drawHQ(BASE_THEM, 'bl');
+  drawFrame();
+
+  if (state.showHelp) {
+    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    ctx.font = 'italic 13px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText('河：球掉河丢，车只能走桥', 14, 44);
+  }
+}
+
+// ===== 靶圈完整画法（《场地建模说明》2.3）：米色盘 + 深褐外描边 + 两道内细圆
+//       + 玫瑰红粗弧（顶部留约 120° 缺口）+ 顶部细线 + 两根白门柱 + 蓝椭圆数字 =====
+function drawTargetCircle(c) {
+  const R = c.r, x = c.x, y = c.y;
+  ctx.save();
+  // 米色底盘
+  ctx.beginPath(); ctx.arc(x, y, R, 0, TAU);
+  ctx.fillStyle = PAL.disc; ctx.fill();
+  // 外圈粗描边（线宽 ≈0.05R）
+  ctx.lineWidth = Math.max(2.5, R * 0.05);
+  ctx.strokeStyle = PAL.discOuter; ctx.stroke();
+  // 两道内细圆
+  ctx.lineWidth = 1.5; ctx.strokeStyle = PAL.discLine;
+  ctx.beginPath(); ctx.arc(x, y, R * 0.90, 0, TAU); ctx.stroke();
+  ctx.beginPath(); ctx.arc(x, y, R * 0.78, 0, TAU); ctx.stroke();
+  // 红色粗弧 r=0.70R；顶部留约 120° 缺口（从 -30° 顺画到 210°，方形端头）
+  ctx.beginPath(); ctx.arc(x, y, R * 0.70, -Math.PI / 6, Math.PI * 7 / 6);
+  ctx.lineWidth = Math.max(3, R * 0.12); ctx.strokeStyle = PAL.redArc; ctx.stroke();
+  // 顶部细线：r=0.95R → 圆心
+  ctx.beginPath(); ctx.moveTo(x, y - R * 0.95); ctx.lineTo(x, y);
+  ctx.lineWidth = 1; ctx.strokeStyle = PAL.redArc; ctx.stroke();
+  // 两根白"门柱"
+  const pw = R * 0.10, ph = R * 0.60, px = R * 0.20;
+  for (const s of [-1, 1]) {
+    ctx.beginPath();
+    ctx.rect(x + s * px - pw / 2, y - ph / 2, pw, ph);
+    ctx.fillStyle = PAL.postWhite; ctx.fill();
+    ctx.lineWidth = 1.2; ctx.strokeStyle = PAL.postLine; ctx.stroke();
+  }
+  // 蓝椭圆数字底 + 白数字
+  ctx.beginPath(); ctx.ellipse(x, y, R * 0.40, R * 0.33, 0, 0, TAU);
+  ctx.fillStyle = PAL.numBlue; ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + Math.round(R * 0.55) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(String(c.id), x, y + 1);
+  ctx.restore();
+}
+
+function drawCircles() {
+  const cfg = state.config;
+  ctx.save();
+  for (const c of CIRCLES) {
+    const isStart = c.id === cfg.startId;
+    const far = isFarCircle(c);
+    const downN = far ? targetsOfCircle(c.id).filter(t => t.down).length : 0;
+    drawTargetCircle(c);
+    // 起点：金色虚线外环高亮（不覆盖靶圈画法）
+    if (isStart) {
+      ctx.save();
+      ctx.setLineDash([7, 5]);
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(255,193,7,0.95)';
+      ctx.beginPath(); ctx.arc(c.x, c.y, c.r + 8, 0, TAU); ctx.stroke();
+      ctx.restore();
+    }
+    // 击倒过目标物的对岸圈：淡绿环提示（v2.5 压淡）
+    if (far && downN > 0) {
+      ctx.beginPath(); ctx.arc(c.x, c.y, c.r + 3, 0, TAU);
+      ctx.strokeStyle = 'rgba(27,94,32,0.45)';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    }
+    if (state.showHelp) {
+      ctx.fillStyle = 'rgba(70,56,38,0.85)';
+      ctx.font = 'bold 10px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'alphabetic';
+      const role = isStart ? '己方起点' :
+        far ? '对岸目标圈 ' + downN + '/' + TARGETS_PER_CIRCLE : '己方空圈';
+      const ty = (c.y + c.r + 13 > ARENA_H - 6) ? (c.y - c.r - 6) : (c.y + c.r + 13);
+      ctx.fillText(role, c.x, ty);
+    }
+  }
+  ctx.restore();
+}
+
+// 目标物：灰色空心方框（约 28×28、边框 4，接近照片里的灰色塑料靶架）；击倒后压扁变淡
+function drawTargets() {
+  const w = TARGET_SIZE, bw = 5;
+  for (const t of state.targets) {
+    ctx.save();
+    if (t.down) {
+      ctx.globalAlpha = 0.3;
+      ctx.fillStyle = PAL.target;
+      ctx.fillRect(t.x - w / 2, t.y - 4, w, 8);
+    } else {
+      ctx.strokeStyle = PAL.target;
+      ctx.lineWidth = bw;
+      ctx.strokeRect(t.x - w / 2 + bw / 2, t.y - w / 2 + bw / 2, w - bw, w - bw);
+    }
+    ctx.restore();
+  }
+}
+
+function drawBalls() {
+  for (const b of state.balls) {
+    if (!b.alive) continue;
+    if (b === state.collectingBall || b === state.loadedBall) continue;
+    ctx.fillStyle = b.handPlaced ? '#ff9800' : '#d32f2f';
+    ctx.beginPath(); ctx.arc(b.x, b.y, BALL_R, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#7f0000'; ctx.lineWidth = 1.5; ctx.stroke();
+  }
+}
+
+function drawCar() {
+  const c = state.car;
+  const L = CAR_LEN / 2, W = CAR_WID / 2;
+  ctx.save();
+  ctx.translate(c.x, c.y);
+  ctx.rotate(c.theta);
+  // 车身（白色主体）
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(-L, -W, CAR_LEN, CAR_WID);
+  ctx.strokeStyle = '#000'; ctx.lineWidth = 1.5;
+  ctx.strokeRect(-L, -W, CAR_LEN, CAR_WID);
+  // v2.7：只有两个后轮（后驱，黑色轮胎 + 浅色轮辐）
+  for (const [wx, wy] of [[WHEEL_AXLE_X, WHEEL_SPAN / 2], [WHEEL_AXLE_X, -WHEEL_SPAN / 2]]) {
+    ctx.fillStyle = '#2b3236';
+    ctx.beginPath(); ctx.arc(wx, wy, WHEEL_DIA / 2, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#e2e9ee'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(wx, wy, WHEEL_DIA / 4, 0, Math.PI * 2); ctx.stroke();
+  }
+  // 车头 = 黑色收球器（+theta 方向）
+  ctx.fillStyle = '#000';
+  ctx.fillRect(L * 0.55, -W * 0.55, L * 0.45, W * 1.1);
+  // 车尾 = 发球口（-theta 方向）：浅灰出球槽（用户反馈车尾不该有黑块，改为车体同色系浅灰）
+  ctx.fillStyle = '#cfd8dc';
+  ctx.fillRect(-L, -W * 0.45, Math.max(2, L * 0.26), W * 0.9);
+  ctx.strokeStyle = '#90a4ae'; ctx.lineWidth = 1;
+  ctx.strokeRect(-L, -W * 0.45, Math.max(2, L * 0.26), W * 0.9);
+  if (state.collectingBall) {
+    ctx.fillStyle = 'rgba(33,150,243,0.45)';
+    ctx.beginPath(); ctx.arc(L * 0.9, 0, Math.max(5, CAR_WID * 0.5), 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#1976d2'; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.fillStyle = '#1976d2';
+    ctx.beginPath(); ctx.arc(L * 0.9, 0, Math.max(2, CAR_WID * 0.25), 0, Math.PI * 2); ctx.fill();
+  }
+  if (state.loadedBall) {
+    ctx.fillStyle = '#d32f2f';
+    ctx.beginPath(); ctx.arc(-L * 0.72, 0, Math.max(3, CAR_WID * 0.3), 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#7f0000'; ctx.lineWidth = 1.5; ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// 瞄准线（v2.7）：从车尾发球口沿中轴线画到第一个撞墙点，再按**反弹折线**画到落点圆心
+// 折点 = 实际撞墙点、各段方向 = 弹道各段方向（不再用一条斜线直连）
+function aimLine() {
+  if (!state.lastPredict) return null;
+  const P = state.lastPredict;
+  const raw = (P.points && P.points.length >= 2) ? P.points
+    : [{ x: P.spawn.x, y: P.spawn.y }, { x: P.x, y: P.y }];
+  // 去掉零长度段：发球点贴边框、或擦角双反射时 traceShot 会出现重复点，
+  // 直接画会在发球点/角点画出"假撞墙方块"，这里过滤掉（>0.5px 才算一段）
+  const pts = [{ x: raw[0].x, y: raw[0].y }];
+  for (let i = 1; i < raw.length; i++) {
+    const prev = pts[pts.length - 1];
+    if (Math.hypot(raw[i].x - prev.x, raw[i].y - prev.y) > 0.5) pts.push({ x: raw[i].x, y: raw[i].y });
+  }
+  // 终点必须是落点圆心
+  const last = pts[pts.length - 1];
+  if (Math.hypot(last.x - P.x, last.y - P.y) > 1e-9) pts.push({ x: P.x, y: P.y });
+  return {
+    from: { x: pts[0].x, y: pts[0].y },
+    to: { x: P.x, y: P.y },
+    points: pts,
+    bounces: Math.max(0, pts.length - 2),
+  };
+}
+
+// 落点预判圈：圆心 = 预计落点，半径 SPREAD_R，颜色按落点性质
+function shouldDrawPredict() {
+  return !!(state.showPredict && state.lastPredict && state.predictAlpha > 0.02);
+}
+function shouldDrawHistory() {
+  return !!state.showSpread;
+}
+function drawPredict() {
+  const P = state.lastPredict;
+  if (!shouldDrawPredict()) return;
+  const col = LANDING_RGBA[landingColor(P.type)];
+  ctx.save();
+  ctx.globalAlpha = state.predictAlpha;
+  ctx.fillStyle = col + '0.16)';
+  ctx.strokeStyle = col + '0.85)';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath(); ctx.arc(P.x, P.y, SPREAD_R, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.strokeStyle = col + '0.9)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(P.x - 4, P.y); ctx.lineTo(P.x + 4, P.y);
+  ctx.moveTo(P.x, P.y - 4); ctx.lineTo(P.x, P.y + 4);
+  ctx.stroke();
+  // build-29：落地后连续弹跳的落点，用淡色小点标出（越往后越小越淡）
+  if (P.bouncePoints && P.bouncePoints.length) {
+    ctx.setLineDash([]);
+    for (let i = 0; i < P.bouncePoints.length; i++) {
+      const q = P.bouncePoints[i];
+      ctx.globalAlpha = state.predictAlpha * Math.max(0.12, 0.55 - i * 0.07);
+      ctx.fillStyle = 'rgba(0,229,255,0.9)';   // build-29：弹跳落点用青色，与落点圈颜色区分 */
+
+      ctx.beginPath();
+      ctx.arc(q.x, q.y, Math.max(1.6, 3.2 - i * 0.3), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = state.predictAlpha;
+  }
+  ctx.restore();
+}
+
+function drawAim() {
+  if (!state.showAim) return;
+  const line = aimLine();
+  if (!line || state.predictAlpha <= 0.02) return;
+  const col = LANDING_RGBA[landingColor(state.lastPredict.type)];
+  ctx.save();
+  ctx.globalAlpha = state.predictAlpha;
+  ctx.strokeStyle = col + '0.5)';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 4]);
+  ctx.beginPath();
+  ctx.moveTo(line.points[0].x, line.points[0].y);
+  for (let i = 1; i < line.points.length; i++) ctx.lineTo(line.points[i].x, line.points[i].y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  // 撞墙点打小方块：让"反弹折点"看得见
+  ctx.fillStyle = col + '0.75)';
+  for (let i = 1; i < line.points.length - 1; i++) {
+    ctx.fillRect(line.points[i].x - 3, line.points[i].y - 3, 6, 6);
+  }
+  ctx.restore();
+}
+
+function drawSpread() {
+  if (!shouldDrawHistory()) return;
+  const now = performance.now();
+  for (const d of state.spreadDots) {
+    const age = (now - d.t) / 1000;
+    if (age > 30) continue;
+    const a = Math.max(0, 1 - age / 30) * 0.45;
+    let fill, stroke;
+    if (d.river) { fill = 'rgba(33,150,243,' + a + ')'; stroke = 'rgba(13,71,161,' + a + ')'; }
+    else if (d.hit) { fill = 'rgba(76,175,80,' + a + ')'; stroke = 'rgba(27,94,32,' + a + ')'; }
+    else { fill = 'rgba(255,152,0,' + a + ')'; stroke = 'rgba(255,87,34,' + a + ')'; }
+    ctx.fillStyle = fill; ctx.strokeStyle = stroke; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(d.x, d.y, 12, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  }
+}
+
+function drawHUD() {
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, ARENA_W, 30);
+  ctx.fillStyle = '#fff';
+  ctx.font = '14px monospace';
+  ctx.textAlign = 'left';
+  const used = Math.min(state.shotsFired, BALL_TOTAL);
+  const cs = state.loadedBall ? '装好' : state.collectingBall ? '半装' : '空';
+  const phaseTxt = state.phase === 'running' ? '' :
+    state.phase === 'paused' ? '⏸ 暂停' :
+    state.phase === 'finished' ? '🏁 结束' : '⏯ 未开始(空格)';
+  ctx.fillText(
+    '⏱ ' + fmtTime(state.timeLeft) + '  |  🏆 ' + state.score + '分  |  🎱 ' + used + '/6  |  📍' + cs +
+    '  |  🚧' + state.barrierHits + '  ' + phaseTxt, 10, 20);
+
+  // 版本/构建标记（HUD 右下角小字，不挡场地）
+  ctx.fillStyle = 'rgba(255,255,255,0.70)';
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText(APP_VERSION + ' · ' + APP_BUILD, ARENA_W - 8, ARENA_H - 8);
+  ctx.textAlign = 'left';
+
+  // 6 球发完提示开过桥
+  if (state.phase === 'running' && state.shotsFired >= BALL_TOTAL && !state.reachedHQ) {
+    ctx.fillStyle = 'rgba(255,213,79,0.95)';
+    ctx.font = 'bold 19px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('6 球发完！开过桥 → 左下对方指挥部', ARENA_W / 2, 64);
+  }
+}
+
+// ==================== 面板 ====================
+function updatePanel() {
+  document.getElementById('score').textContent = state.score;
+  const tdEl = document.getElementById('targets-down');
+  const td = targetsDownCount(), tt = totalTargets();
+  tdEl.textContent = td + ' / ' + tt;
+  tdEl.className = 'stat-val ' + (td > 0 ? 'good' : '');
+  const t = state.timeLeft;
+  document.getElementById('time').textContent = fmtTime(t);
+  document.getElementById('time').className = 'stat-val ' + (t <= 0 ? 'bad' : t < 30 ? 'bad' : t < 60 ? 'warn' : 'good');
+  const phaseEl = document.getElementById('phase');
+  phaseEl.textContent = state.phase === 'running' ? '训练中' : state.phase === 'paused' ? '已暂停' : state.phase === 'finished' ? '已结束' : '未开始';
+  phaseEl.className = 'stat-val ' + (state.phase === 'running' ? 'good' : state.phase === 'finished' ? 'warn' : '');
+  document.getElementById('balls').textContent = Math.min(state.shotsFired, BALL_TOTAL) + ' / ' + BALL_TOTAL;
+  const loadedEl = document.getElementById('loaded');
+  loadedEl.textContent = state.loadedBall ? '装好✓' : state.collectingBall ? '半装→' : '空';
+  loadedEl.className = 'stat-val ' + (state.loadedBall ? 'good' : state.collectingBall ? 'warn' : '');
+  const cc = carInAnyCircle();
+  const inCircleEl = document.getElementById('in-circle');
+  inCircleEl.textContent = cc ? '是（圈' + cc.id + '）' : '否';
+  inCircleEl.className = 'stat-val ' + (cc ? 'good' : 'bad');
+  // build-30：合法发射位提示（车体压圈 + 整车四角在场内；不可发时显示差多少 px）
+  const fsInfo = fireSpotInfo();
+  const spotEl = document.getElementById('fire-spot');
+  if (spotEl) {
+    spotEl.textContent = fsInfo.ok ? '可发（圈' + fsInfo.circleId + '）' : '差 ' + fsInfo.gap.toFixed(0) + 'px 才到发射位';
+    spotEl.className = 'stat-val ' + (fsInfo.ok ? 'good' : 'bad');
+  }
+  const crossedEl = document.getElementById('crossed');
+  crossedEl.textContent = state.reachedHQ ? '已到对方指挥部' : state.crossed ? '已过河' : '未过河';
+  crossedEl.className = 'stat-val ' + (state.crossed ? 'good' : '');
+  const bEl = document.getElementById('barrier-hits');
+  bEl.textContent = state.barrierHits;
+  bEl.className = 'stat-val ' + (state.barrierHits > 0 ? 'warn' : 'good');
+
+  const list = document.getElementById('circle-list');
+  let html = '';
+  for (const c of CIRCLES) {
+    const isStart = c.id === state.config.startId;
+    const far = isFarCircle(c);
+    const ts = far ? targetsOfCircle(c.id) : [];
+    const down = ts.filter(x => x.down).length;
+    let role, right, cls = 'pending';
+    if (isStart) { role = '己方起点'; right = '—'; }
+    else if (far) {
+      role = '对岸目标圈';
+      right = down + ' / ' + TARGETS_PER_CIRCLE;
+      cls = down > 0 ? 'hit' : 'pending';
+    } else { role = '己方空圈'; right = '—'; }
+    html += '<div class="' + cls + '"><span>圈 ' + c.id + ' ' + role + '</span><span>' + right + '</span></div>';
+  }
+  list.innerHTML = html;
+}
+
+// 面板按钮状态
+function updateButtons() {
+  const btn = document.getElementById('btn-toggle');
+  btn.textContent = state.phase === 'running' ? '⏸ 暂停' : state.phase === 'finished' ? '▶ 再来一局' : '▶ 开始训练';
+  btn.className = 'primary';
+  const place = document.getElementById('btn-place');
+  place.textContent = state.placeMode ? '📍 摆球中（点场地放球=10分/个）' : '📍 摆球模式（手放球 10 分/个）';
+}
+
+// ==================== 主循环 ====================
+let lastT = performance.now();
+let simAcc = 0;   // 累积真实 dt，按固定 1/60 子步推进物理（与 traceShot 同一套步长）
+function loop(t) {
+  const rawDt = Math.min(0.1, Math.max(0, (t - lastT) / 1000));
+  lastT = t;
+  simAcc += rawDt;
+  let guard = 0;
+  while (simAcc >= FIXED_STEP && guard < 6) {
+    if (state.phase === 'running') {
+      state.timeLeft -= FIXED_STEP;
+      state.elapsed += FIXED_STEP;
+      if (state.timeLeft <= 0) { state.timeLeft = 0; finishRound('时间到'); }
+      updateCar(FIXED_STEP);
+      syncCollectingBall();
+      updateBalls(FIXED_STEP);
+    }
+    simAcc -= FIXED_STEP;
+    guard++;
+  }
+  if (simAcc > FIXED_STEP * 6) simAcc = 0;   // 卡顿后不追赶，丢弃多余积累
+  pollGamepad();
+  // 落点预判节流：≤20Hz 刷新（按住时按 0.02s 步进立即刷新），平均开销远低于每帧重算
+  const canP = canFireNow();
+  const nowP = performance.now();
+  const holdP = currentHoldSeconds();
+  if (canP) {
+    const justPressed = state.firePressed && !state.firePressedPrev;
+    if (justPressed) state.pressSettled = false;
+    // 按住期间：只允许"按下那一帧"立即算（按下瞬间带出按压量），之后并入周期节流
+    const pressFirst = state.firePressed && !state.pressSettled && holdP >= 0.015;
+    const poseMoved = Math.abs(state.car.theta - state.predictTheta) > 0.008 ||
+                      Math.hypot(state.car.x - state.predictX, state.car.y - state.predictY) > 0.5;
+    const due = justPressed || pressFirst || poseMoved || (nowP - state.predictAt >= PREDICT_INTERVAL_MS);
+    if (due) {
+      const t0 = performance.now();
+      const p = predictPoint(holdP);
+      const cost = performance.now() - t0;
+      state.predictMs = state.predictMs * 0.8 + cost * 0.2;
+      state.predictCalls++;
+      state.predictAt = nowP;
+      state.predictHold = holdP;
+      state.predictX = state.car.x; state.predictY = state.car.y; state.predictTheta = state.car.theta;
+      if (state.firePressed && holdP >= 0.015) state.pressSettled = true;
+      if (p) state.lastPredict = p;
+    }
+  }
+  state.firePressedPrev = state.firePressed;
+  state.predictAlpha += ((canP && state.lastPredict ? 1 : 0) - state.predictAlpha) * 0.15;
+  drawArena();
+  drawCircles();
+  drawTargets();
+  drawPredict();
+  drawSpread();
+  drawBalls();
+  drawCar();
+  drawAim();
+  drawHUD();
+  updatePanel();
+  updateButtons();
+  requestAnimationFrame(loop);
+}
+
+// ==================== 起点圈设置 ====================
+// v2.2：目标物固定在对岸圈（自动判定），不再手动勾选目标圈
+function applyConfig(startId, silent) {
+  // 起点圈只能是我方（河上方）的圈；传了对岸号就回落到默认起点圈
+  if (!ourCircleIds().includes(startId)) startId = defaultStartId();
+  state.config.startId = startId;
+  const sel = document.getElementById('sel-start');
+  if (sel) sel.value = String(startId);
+  saveConfig();
+  resetRound(true);
+  if (!silent) flash('🎲 起点圈 ' + startId + '；对岸圈 ' + farCircleIds().join('、') + ' 自动为目标物');
+}
+
+// ==================== 事件绑定 ====================
+document.getElementById('tgt-aim').addEventListener('change', e => state.showAim = e.target.checked);
+document.getElementById('tgt-predict').addEventListener('change', e => state.showPredict = e.target.checked);
+document.getElementById('tgt-spread').addEventListener('change', e => state.showSpread = e.target.checked);
+document.getElementById('tgt-help').addEventListener('change', e => state.showHelp = e.target.checked);
+document.getElementById('tgt-aim').checked = true;
+document.getElementById('tgt-predict').checked = true;
+
+document.getElementById('btn-toggle').addEventListener('click', toggleRound);
+document.getElementById('btn-reset').addEventListener('click', () => resetRound());
+document.getElementById('btn-draw').addEventListener('click', () => {
+  const ours = ourCircleIds();
+  const start = ours[Math.floor(Math.random() * ours.length)];
+  applyConfig(start);
+});
+document.getElementById('sel-start').addEventListener('change', () => {
+  applyConfig(parseInt(document.getElementById('sel-start').value, 10));
+});
+
+document.getElementById('btn-addball').addEventListener('click', () => {
+  state.balls.push({ x: state.car.x + 30, y: state.car.y, vx: 0, vy: 0, alive: true, flying: false, id: state.balls.length, handPlaced: false, originCircleId: null });
+  flash('➕ 加球（练习用，不计入 6 球）');
+});
+document.getElementById('btn-clear-spread').addEventListener('click', () => { state.spreadDots = []; flash('🧹 已清'); });
+document.getElementById('btn-place').addEventListener('click', () => {
+  state.placeMode = !state.placeMode;
+  updateButtons();
+});
+document.getElementById('btn-fullscreen').addEventListener('click', () => {
+  if (!document.fullscreenElement) {
+    const el = document.documentElement;
+    if (el.requestFullscreen) el.requestFullscreen();
+  } else if (document.exitFullscreen) {
+    document.exitFullscreen();
+  }
+});
+document.getElementById('ov-again').addEventListener('click', () => { resetRound(true); startRound(); });
+document.getElementById('ov-close').addEventListener('click', () => document.getElementById('overlay').classList.add('hidden'));
+
+canvas.addEventListener('click', e => {
+  if (!state.placeMode) return;
+  if (state.phase === 'running' || state.phase === 'paused') { flashThrottled('训练中不能摆球，请先重置', 1500); return; }
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (ARENA_W / rect.width);
+  const y = (e.clientY - rect.top) * (ARENA_H / rect.height);
+  if (inRiver(x, y) && !onBridge(x, y)) { flash('⚠️ 河里不能放球'); return; }
+  state.balls.push({ x, y, vx: 0, vy: 0, alive: true, flying: false, id: state.balls.length, handPlaced: true, originCircleId: null });
+  flash('📍 手放球（10 分）');
+});
+
+// ===== 底部控制区事件（build-12）=====
+// 左圆摇杆：按住拖动才开车；松手立刻停、摇杆头弹回（轻扫闪一下不会让车动）
+const joyEl = document.getElementById('joy');
+const knobEl = document.getElementById('joy-knob');
+function joyGeometry() {
+  const r = joyEl.getBoundingClientRect();
+  const rr = Math.max(1, Math.min(r.width, r.height) / 2);
+  return { cx: r.left + r.width / 2, cy: r.top + r.height / 2, half: rr };
+}
+// APK SeniorRocker 手感：touchstart 记起点，touchmove 用"手指相对起点的位移"按半径限幅，tap/轻扫位移很小
+function moveJoyDelta(clientX, clientY) {
+  const g = joyGeometry();
+  const R = JOY_R * (g.half / (JOY_SIZE / 2));   // 按实际渲染尺寸缩放松手半径
+  let ox = clientX - state.joy.sx, oy = clientY - state.joy.sy;
+  const mag = Math.hypot(ox, oy);
+  if (mag > R && mag > 0) { ox = ox / mag * R; oy = oy / mag * R; }
+  state.joy.ox = ox; state.joy.oy = oy;
+  knobEl.style.transform = 'translate(' + ox.toFixed(1) + 'px, ' + oy.toFixed(1) + 'px)';
+}
+function joyDown(e) {
+  if (e) e.preventDefault();
+  if (state.phase !== 'running') { flashThrottled('先点「开始训练」', 1500); return; }
+  state.joy.down = true; state.joy.heldMs = 0;
+  state.joy.ox = 0; state.joy.oy = 0;                    // APK：按下瞬间摇杆回中，不跳位
+  state.joy.sx = e ? e.clientX : 0; state.joy.sy = e ? e.clientY : 0;   // APK：记按下起点
+  state.joy.pid = e && e.pointerId !== undefined ? e.pointerId : null;
+  joyEl.classList.add('active');
+  if (e && joyEl.setPointerCapture && e.pointerId !== undefined) { try { joyEl.setPointerCapture(e.pointerId); } catch (err) {} }
+  if (knobEl) knobEl.style.transform = 'translate(0px, 0px)';
+}
+function joyMove(e) {
+  if (!state.joy.down || !e) return;
+  if (state.joy.pid !== null && e.pointerId !== undefined && e.pointerId !== state.joy.pid) return;
+  e.preventDefault();
+  moveJoyDelta(e.clientX, e.clientY);
+}
+function joyUp(e) {
+  if (e) e.preventDefault();
+  if (!state.joy.down) return;
+  releaseJoy();
+}
+joyEl.addEventListener('pointerdown', joyDown);
+joyEl.addEventListener('pointermove', joyMove);
+joyEl.addEventListener('pointerup', joyUp);
+joyEl.addEventListener('pointercancel', joyUp);
+joyEl.addEventListener('pointerleave', e => { if (state.joy.down && e.buttons === 0) joyUp(e); });
+// 右 A/B 两圆钮：A=发射（按住时长只影响圈内概率偏置，松手打出去），B=收球（按 2 次装好）
+const fireBtn = document.getElementById('btn-fire');
+const collectBtn = document.getElementById('btn-collect');
+fireBtn.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  fireBtn.classList.add('active');
+  if (state.phase !== 'running') { flashThrottled('先点「开始训练」', 1500); return; }
+  state.firePressed = true;
+  state.firePressStart = performance.now();
+});
+const btnFireUp = e => {
+  if (e) e.preventDefault();
+  fireBtn.classList.remove('active');
+  if (!state.firePressed) return;
+  const d = (performance.now() - state.firePressStart) / 1000;
+  state.firePressed = false;
+  tryFire(d);
+};
+fireBtn.addEventListener('pointerup', btnFireUp);
+fireBtn.addEventListener('pointercancel', btnFireUp);
+fireBtn.addEventListener('pointerleave', e => { if (e.buttons === 0) btnFireUp(e); });
+collectBtn.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  collectBtn.classList.add('active');
+  tryCollect();
+});
+['pointerup', 'pointercancel', 'pointerleave'].forEach(ev =>
+  collectBtn.addEventListener(ev, () => collectBtn.classList.remove('active')));
+// 速度条：0~100% 调最高车速（键盘/摇杆共用；存 localStorage）
+const spdRange = document.getElementById('spd-range');
+spdRange.addEventListener('input', () => setSpeedPct(spdRange.value));
+
+// v2.7：射程 = 固定 R0（发球口口径 167）；方向 = 车尾方向；撞边框镜面反弹、瞄准线画折线；
+// 实际弹道 = 预判弹道整条平行平移 ≤28px（按住时均值沿落点处方向偏 ±8.4px）
+
+// ==================== 初始化 ====================
+loadConfig();
+try {
+  const sp = parseFloat(localStorage.getItem(SPEED_KEY));
+  if (isFinite(sp)) state.speedPct = clamp(Math.round(sp), 0, 100);
+} catch (e) {}
+setSpeedPct(state.speedPct, true);
+loadBest();
+// 起点圈只允许我方（河上方）的圈；老配置指到对岸时自动纠正到"离己方基地最近的我方圈"
+normalizeStartCircle();
+fillStartOptions();
+refreshTargetNote();
+// 生产用真随机种子（测试可随时 setRandomSeed 注入固定种子）
+setRandomSeed(((Date.now() & 0xffffffff) ^ Math.floor(Math.random() * 0xffffffff)) >>> 0);
+applyConfig(state.config.startId, true);
+if (startCorrected) setTimeout(() => flash('ℹ️ 旧配置的起点圈在对岸，已改为我方 ' + state.config.startId + ' 号'), 900);
+requestAnimationFrame(loop);
+
+// 调试/测试导出
+window.__SIM_VERSION__ = APP_VERSION + '+' + APP_BUILD;
+window.__SIM__ = {
+  state, inRiver, onBridge, xAt, riverTopY, riverBotY, bridgeLocal, railLocalHit, inCircle, carInAnyCircle,
+  onFarSide, drawArena, drawCircles, drawTargets, PAL,
+  tryFire, tryCollect, inCollectZone, COLLECT_FWD, COLLECT_BACK, COLLECT_HALF_W, updateCar, updateBalls, syncCollectingBall, landBall,
+  startRound, pauseRound, toggleRound, finishRound, resetRound, applyConfig,
+  isFarCircle, farCircleIds, ourCircleIds, defaultStartId, nearestOurCircle,
+  targetsOfCircle, targetsDownCount, totalTargets, buildTargets,
+  CIRCLES, BRIDGE, RIVER_TOP, RIVER_BOT, BRIDGE_RAIL, RAIL_SPAN, bridgeRailSpan, BALL_INIT, BASE_US, BASE_THEM,
+  ARENA_W, ARENA_H, TIME_LIMIT, BALL_R,
+  TARGETS_PER_CIRCLE, TARGET_HIT_RADIUS, AIRBORNE_SPEED, TARGET_OFFSETS,
+  HOLD_T_MAX, SPREAD_R, FLIGHT_SPEED, CALIB_STATION, BOUNCE0, BOUNCE_DECAY, BOUNCE_MIN, BOUNCE_MAX, WHEEL_AXLE_X, HOLD_BIAS_MAX,
+  WALL_BOUNCE_MAX,
+  CAR_LEN, CAR_WID, WHEEL_DIA, WHEEL_SPAN, TAIL_OFFSET, CAR_MOVE_SPEED, CAR_TURN_RATE, FIXED_STEP,
+  carRailHit, bridgeAngle, TARGET_SIZE,
+  obbPointDist, carObbOverlapsCircle, CAR_HALF_DIAG,
+  carHalfExtent, carObbInside, clampCarByBounds, CAR_BOUND_MARGIN, STATION_MARGIN, fireSpotInfo,
+  maxCarSpeed, setSpeedPct, joyMotion, releaseJoy,
+  JOY_SIZE, JOY_KNOB, JOY_R, JOY_MIN_HOLD_MS, JOY_MIN_DISP_PX, SPEED_MIN, SPEED_MAX,
+  shotSpawn, shotRange, landingPoint, landingOutcome, computeBaseRange, calibRangeFromMuzzle,
+  traceShot, shotPath, reachMatrix, reachInfo,
+  get SHOT_RANGE_BASE() { return SHOT_RANGE_BASE; },
+  predictPoint, previewShot, landingColor, aimLine, bounceTrajectory, bounceTotal, advanceWithWalls,
+  setRandomSeed, rnd, rndInDisk, canFireNow, currentHoldSeconds,
+  shouldDrawPredict, shouldDrawHistory,
+  lastShot: () => state.lastShotInfo, PREDICT_INTERVAL_MS,
+  predictStats: () => ({ calls: state.predictCalls, avgMs: state.predictMs }),
+  stats: {
+    get predictCalls() { return state.predictCalls; },
+    get avgMs() { return state.predictMs; },
+    reset() { state.predictCalls = 0; state.predictMs = 0; state.predictAt = -1e9; state.firePressedPrev = false; state.pressSettled = false; },
+  },
+};
+</script>
+</body>
+</html>
